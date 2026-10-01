@@ -34,3 +34,11 @@ The fingerprint has two digests:
 - `strict` hashes the structural fields plus the step sizes, the executables and the initial restart.
 
 A checkpoint is deployable only if its last fine-tune ran on a system whose `structural` digest equals the canonical GrASE system's.
+
+## Catalog
+
+```bash
+.venv/bin/python -m hycom_emulator.catalog configs/systems/abozec_054.toml
+```
+
+This lists every product a system kept and, for each cycle, which roles are present. A cycle is named by its analysis time t_a at 18Z. Roles are files at fixed offsets from t_a: the 24 h-mean background parts, the 00Z snapshot, the increment, and the obs/inov files. They are defined in `catalog.ROLES`.
