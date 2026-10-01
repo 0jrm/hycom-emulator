@@ -9,6 +9,8 @@ dependencies = ["numpy"]
 [project.optional-dependencies]
 # Readers and fingerprints that touch HYCOM/TSIS files on RCC.
 build = ["gom-da", "netCDF4", "xarray", "zarr"]
+# Graph model and training. neural-lam is pinned to one commit; torch comes from its cpu/gpu extra.
+ml = ["neural-lam[cpu] @ git+https://github.com/mllam/neural-lam.git@03b544bb3660a59d3fc02352a75b16cb4ba43b1b"]
 test = ["pytest"]
 
 [tool.uv.sources]
@@ -23,3 +25,6 @@ packages = ["src/hycom_emulator"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
