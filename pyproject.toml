@@ -8,7 +8,7 @@ dependencies = ["numpy"]
 
 [project.optional-dependencies]
 # Readers and fingerprints that touch HYCOM/TSIS files on RCC.
-build = ["gom-da", "netCDF4"]
+build = ["gom-da", "netCDF4", "xarray", "zarr"]
 test = ["pytest"]
 
 [tool.uv.sources]
