@@ -48,6 +48,7 @@ class SystemConfig:
     first_cycle: date
     last_cycle: date
     products: dict[str, str]
+    forcing_files: dict[str, str]
 
     @classmethod
     def from_toml(cls, path: Path) -> SystemConfig:
@@ -71,6 +72,7 @@ class SystemConfig:
             first_cycle=raw["first_cycle"],
             last_cycle=raw["last_cycle"],
             products=dict(raw["products"]),
+            forcing_files=dict(raw.get("forcing_files", {})),
         )
 
     def product_glob(self, product: str) -> str:

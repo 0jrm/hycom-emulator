@@ -4,6 +4,8 @@ B00 steps the 00Z archv snapshot one day: state(00Z d) -> state(00Z d+1). Store 
 snapshot at 00Z of day c and the increment valid at 18Z of day c. Over 00Z(d-1) -> 00Z(d) the IAU
 adds 18 h of inc(d-2) then 6 h of inc(d-1), so the forcing at time 00Z(d) is
 0.75 inc(d-2) + 0.25 inc(d-1). The first two rows have no forcing and are dropped.
+With --atm (a forcing.py zarr of 6 h blocks), the forcing also holds the 24 h mean of each
+atmospheric field over the same step, the four blocks that start at T-24h .. T-6h.
 
 Output zarr: state (time, grid_index, state_feature), forcing (time, grid_index, forcing_feature),
 static (grid_index, static_feature), boundary_mask (grid_index): 1 on land and in the nest band
@@ -27,6 +29,9 @@ LAYER_STATE = ("temp", "salin", "thknss", "u", "v")
 SURFACE_STATE = ("srfhgt", "montg1", "ubaro", "vbaro")
 LAYER_FORCING = ("temp", "salin", "thknss")
 IAU_WEIGHTS = (0.75, 0.25)  # inc(d-2), inc(d-1) over 00Z(d-1) -> 00Z(d)
+ATM_UNITS = {"wndewd": "m/s", "wndnwd": "m/s", "airtmp": "degC", "vapmix": "kg/kg", "precip": "m/s",
+             "dswflx": "W/m2", "dlwflx": "W/m2", "mslprs": "Pa minus prsbas", "wndspd": "m/s",
+             "wndspd_ewd": "m2/s2", "wndspd_nwd": "m2/s2"}
 UNITS = {"temp": "degC", "salin": "psu", "thknss": "Pa", "u": "m/s", "v": "m/s", "srfhgt": "m*g", "montg1": "m*g", "ubaro": "m/s", "vbaro": "m/s"}
 
 
@@ -54,7 +59,7 @@ def band_mask(rmu_a: Path, ny: int, nx: int, sl) -> np.ndarray:
     return (rmu > 1.0 / (BAND_EFOLD_DAYS * 86400.0))[sl]
 
 
-def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, stride: int = 1) -> None:
+def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, stride: int = 1, atm: Path | None = None) -> None:
     import dask.array as da
     import xarray as xr
 
@@ -69,6 +74,9 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
 
     s_names = feature_names(LAYER_STATE, SURFACE_STATE, nlayer)
     f_names = feature_names(LAYER_FORCING, (), nlayer, prefix="inc_")
+    atm_ds = xr.open_zarr(atm, consolidated=False) if atm is not None else None
+    atm_names = sorted(atm_ds.data_vars) if atm_ds is not None else []
+    f_names += atm_names
     t = (src["cycle"].values - np.timedelta64(18, "h"))[2:]  # snapshot time of each kept row
     ngrid = x.size * y.size
     gx, gy = np.meshgrid(x, y, indexing="ij")
@@ -98,7 +106,7 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
             "forcing_feature": f_names,
             "static_feature": list(static_vars),
             "state_feature_units": (("state_feature",), [UNITS[n.split("_k")[0]] for n in s_names]),
-            "forcing_feature_units": (("forcing_feature",), [UNITS[n[4:].split("_k")[0]] for n in f_names]),
+            "forcing_feature_units": (("forcing_feature",), [_forcing_unit(n) for n in f_names]),
             "static_feature_units": (("static_feature",), ["m", "degrees_east", "degrees_north", "1/s", "1"]),
         },
         attrs={**src.attrs, "stride": stride, "train_end": str(train_end), "iau_weights": str(IAU_WEIGHTS)},
@@ -111,7 +119,10 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
     for n in range(t.size):
         row = src.isel(cycle=n + 2)
         st = np.nan_to_num(_to_grid_index(_stack(row, LAYER_STATE, SURFACE_STATE, "s00_", sl)))
-        fo = np.nan_to_num(_to_grid_index(IAU_WEIGHTS[0] * incs[0] + IAU_WEIGHTS[1] * incs[1]))
+        fo = _to_grid_index(IAU_WEIGHTS[0] * incs[0] + IAU_WEIGHTS[1] * incs[1])
+        if atm_ds is not None:
+            fo = np.concatenate([fo, _to_grid_index(_atm_24h(atm_ds, atm_names, t[n], sl))], axis=1)
+        fo = np.nan_to_num(fo)
         incs = [incs[1], _stack(row, LAYER_FORCING, (), "inc_", sl)]
         xr.Dataset(
             {"state": (("time", g, "state_feature"), st[None]), "forcing": (("time", g, "forcing_feature"), fo[None])}
@@ -139,6 +150,19 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
         }
     )
     stats.to_zarr(out, mode="a", consolidated=True)
+
+
+def _forcing_unit(name: str) -> str:
+    if name.startswith("atm_"):
+        return ATM_UNITS[name[4:]]
+    return UNITS[name[4:].split("_k")[0]]
+
+
+def _atm_24h(atm_ds, names, t, sl) -> np.ndarray:
+    """(feature, y, x) mean of the four 6 h blocks covering (t-24h, t]."""
+    starts = [t - np.timedelta64(h, "h") for h in (24, 18, 12, 6)]
+    blocks = atm_ds[names].sel(time=starts)
+    return np.stack([blocks[n].values.mean(axis=0)[sl] for n in names])
 
 
 def _safe(s):
@@ -174,8 +198,9 @@ def main() -> None:
     p.add_argument("rmu", type=Path)
     p.add_argument("--train-end", required=True, type=np.datetime64)
     p.add_argument("--stride", type=int, default=1)
+    p.add_argument("--atm", type=Path, default=None, help="forcing.py zarr of 6 h atmospheric blocks")
     a = p.parse_args()
-    prepare(a.store, a.out, a.rmu, a.train_end, a.stride)
+    prepare(a.store, a.out, a.rmu, a.train_end, a.stride, a.atm)
 
 
 if __name__ == "__main__":
