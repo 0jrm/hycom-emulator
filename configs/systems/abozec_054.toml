@@ -1,0 +1,22 @@
+# Provisional GrASE base system. Not confirmed canonical (user, 2026-10-01).
+# abozec READ_ME: "twin of 05.1 with remaph layerization: might become reference for OSEs".
+# Paths below are relative to expt_dir unless absolute. Read only: never write under abozec/.
+name = "abozec_054"
+canonical = false
+note = "05.4 runs a 30-day interior 3-D relax everywhere (relax.rmu = rmu_30days+nest), unlike its twins. June ran blkdat.input_125f (baclin 120, incstp 720)."
+
+expt_dir = "/gpfs/research/coaps/abozec/HYCOM2.3-TSIS/GOMb0.04/expt_05.4"
+hycom_exe = "data/hycom"
+blkdat = "blkdat.input_tsis_225s_24h_v8-29-2025"
+nlist = "rtf/tsis.nlist"
+initial_restart = "data/restart_125c.a"
+runtime_log = "data/hindcast_mean.log"
+relax_rmu = "data/relax.rmu.a"
+
+tsis_bin_dir = "/gpfs/research/coaps/abozec/HYCOM2.3-TSIS/TSISv2.0/src_gmrf/ugos-tsis_202509_corrected"
+tsis_bins = ["xprep", "xgmrf", "xa2inc"]
+forcing = "cfsv2_gom"
+obs_dir = "/gpfs/research/coaps/abozec/HYCOM2.3-TSIS/GOMb0.04/datasets/data_gomb4/qcobs_profile_remap_054"
+
+first_cycle = 2025-03-01
+last_cycle = 2025-09-01
