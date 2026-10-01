@@ -11,7 +11,7 @@
 set -euo pipefail
 RUN_ID=$1
 OUT=$2
-DATA=${DATA:-/scratch/jmiranda/hycom-emulator-data/abozec_054_b00.zarr}
+DATA=${DATA:-/scratch/jmiranda/hycom-emulator-data/abozec_054_b00atm.zarr}
 PY=${PY:-/conda/jmiranda/venvs/hycom-emulator/bin/python}
 SHM=/dev/shm/$USER/$RUN_ID
 export CUDA_VISIBLE_DEVICES=${GPU:-0}
