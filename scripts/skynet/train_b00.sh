@@ -41,7 +41,7 @@ timeout --signal=INT 7h $PY -m hycom_emulator.nlam train_model --config_path nla
   --epochs ${EPOCHS1:-300} --ar_steps_train 1 --logger_run_name "$RUN_ID-s1" || echo "stage 1 exit $? (124 = time cap reached)"
 S1=$(best "$RUN_ID-s1"); [ -n "$S1" ] || { echo "stage 1 left no checkpoint"; exit 1; }; echo "stage 1 best: $S1"
 echo "== $(date -Is) stage 2: 2-step fine-tune"
-timeout --signal=INT 3h30m $PY -m hycom_emulator.nlam train_model --config_path nlam.yaml "${MODEL[@]}" \
+timeout --signal=INT 210m $PY -m hycom_emulator.nlam train_model --config_path nlam.yaml "${MODEL[@]}" \
   --epochs ${EPOCHS2:-100} --ar_steps_train 2 --load "$S1" --logger_run_name "$RUN_ID-s2" || echo "stage 2 exit $? (124 = time cap reached)"
 S2=$(best "$RUN_ID-s2"); [ -n "$S2" ] || { echo "stage 2 left no checkpoint"; exit 1; }; echo "stage 2 best: $S2"
 echo "== $(date -Is) evaluate"
