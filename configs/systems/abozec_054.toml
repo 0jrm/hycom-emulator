@@ -18,5 +18,17 @@ tsis_bins = ["xprep", "xgmrf", "xa2inc"]
 forcing = "cfsv2_gom"
 obs_dir = "/gpfs/research/coaps/abozec/HYCOM2.3-TSIS/GOMb0.04/datasets/data_gomb4/qcobs_profile_remap_054"
 
-first_cycle = 2025-03-01
+# Cycle 03-01 has no analysis of its own: incupd.2025_060_18 came with the initial state.
+first_cycle = 2025-03-02
 last_cycle = 2025-09-01
+
+# One glob per product. Each matched file's valid time comes from its name (YYYY_DDD_HH or
+# YYYYMMDDHH), or from the .b dtime for restarts.
+[products]
+restart = "data/restart_125?.a"
+incupd = "data/incup/incupd.2025_*_18.a"
+inc_nc = "data/inc.2025_*_18.nc"
+archv = "data/tarv_*/054_archv.2025_*.a"
+archm = "data/tarm_*/054_archm.2025_*.a"
+tsis_obs = "{obs_dir}/tsis_obs_gomb4_*.nc"
+tsis_inov = "{obs_dir}/tsis_inov_gomb4_*.nc"

@@ -47,6 +47,7 @@ class SystemConfig:
     obs_dir: Path
     first_cycle: date
     last_cycle: date
+    products: dict[str, str]
 
     @classmethod
     def from_toml(cls, path: Path) -> SystemConfig:
@@ -69,7 +70,13 @@ class SystemConfig:
             obs_dir=Path(raw["obs_dir"]),
             first_cycle=raw["first_cycle"],
             last_cycle=raw["last_cycle"],
+            products=dict(raw["products"]),
         )
+
+    def product_glob(self, product: str) -> str:
+        """Glob for one product's files. Relative patterns are under expt_dir; `{obs_dir}` expands."""
+        pattern = self.products[product].format(obs_dir=self.obs_dir)
+        return pattern if pattern.startswith("/") else str(self.expt_dir / pattern)
 
 
 @dataclass(frozen=True)
