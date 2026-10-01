@@ -42,3 +42,14 @@ A checkpoint is deployable only if its last fine-tune ran on a system whose `str
 ```
 
 This lists every product a system kept and, for each cycle, which roles are present. A cycle is named by its analysis time t_a at 18Z. Roles are files at fixed offsets from t_a: the 24 h-mean background parts, the 00Z snapshot, the increment, and the obs/inov files. They are defined in `catalog.ROLES`.
+
+## Setup (skynet, GPU training)
+
+```bash
+git clone git@github.com:0jrm/hycom-emulator.git /unity/g2/jmiranda/hycom-emulator
+cd /unity/g2/jmiranda/hycom-emulator
+uv venv --python 3.12 .venv
+uv pip install -p .venv/bin/python -e ".[ml,test]" --torch-backend cu130
+```
+
+Training data is copied from RCC, never code. Use only GPUs 0–2 (workspace rule).
