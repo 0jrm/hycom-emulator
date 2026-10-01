@@ -13,3 +13,4 @@ __pycache__/
 runs/
 wandb/
 mlruns/
+logs/
