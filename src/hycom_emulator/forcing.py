@@ -88,7 +88,10 @@ def build(cfg: SystemConfig, out: Path, first: datetime, last: datetime) -> None
             attrs={"system": cfg.name, "block_hours": 6, "files": str(dict(cfg.forcing_files))},
         )
         if n == 0:
-            ds.to_zarr(out, mode="w", consolidated=False)
+            # Fix the time encoding up front: xarray infers it from the first block, and whole days
+            # cannot hold the 6 h offsets of later appends.
+            enc = {"time": {"units": "hours since 2000-01-01 00:00:00", "dtype": "int64"}}
+            ds.to_zarr(out, mode="w", consolidated=False, encoding=enc)
         else:
             ds.to_zarr(out, append_dim="time", consolidated=False)
 
