@@ -49,7 +49,7 @@ This lists every product a system kept and, for each cycle, which roles are pres
 git clone git@github.com:0jrm/hycom-emulator.git /unity/g2/jmiranda/hycom-emulator
 cd /unity/g2/jmiranda/hycom-emulator
 uv venv --python 3.12 .venv
-uv pip install -p .venv/bin/python -e ".[ml,test]" --torch-backend cu130
+uv pip install -p .venv/bin/python -e ".[ml,test]" --torch-backend cu128
 ```
 
 Training data is copied from RCC, never code. Use only GPUs 0–2 (workspace rule).
