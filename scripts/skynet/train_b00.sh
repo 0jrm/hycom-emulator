@@ -12,7 +12,9 @@ DATA=${DATA:-/scratch/jmiranda/hycom-emulator-data/abozec_054_b00.zarr}
 PY=${PY:-/conda/jmiranda/venvs/hycom-emulator/bin/python}
 SHM=/dev/shm/$USER/$RUN_ID
 export CUDA_VISIBLE_DEVICES=${GPU:-0}
-export MLFLOW_TRACKING_URI=file:$OUT/mlruns MLFLOW_DISABLE_AGENT_HINT=1 OMP_NUM_THREADS=8
+# MLflow 3 refuses the file store; SQLite keeps metrics in one file:
+#   sqlite3 <out>/mlflow.db "select key, step, value from metrics"
+export MLFLOW_TRACKING_URI=sqlite:///$OUT/mlflow.db MLFLOW_DISABLE_AGENT_HINT=1 OMP_NUM_THREADS=8
 MODEL=(--model graph_lam --graph multiscale --hidden_dim 128 --processor_layers 4 --batch_size 4
        --lr 1e-3 --ar_steps_eval 2 --val_steps_to_log 1 2 --val_interval 1 --n_example_pred 0
        --num_workers 8 --logger mlflow --runs_root "$OUT/runs")
@@ -37,11 +39,11 @@ echo "== $(date -Is) graph"
 echo "== $(date -Is) stage 1: 1-step training"
 timeout --signal=INT 7h $PY -m hycom_emulator.nlam train_model --config_path nlam.yaml "${MODEL[@]}" \
   --epochs ${EPOCHS1:-300} --ar_steps_train 1 --logger_run_name "$RUN_ID-s1" || echo "stage 1 exit $? (124 = time cap reached)"
-S1=$(best "$RUN_ID-s1"); echo "stage 1 best: $S1"
+S1=$(best "$RUN_ID-s1"); [ -n "$S1" ] || { echo "stage 1 left no checkpoint"; exit 1; }; echo "stage 1 best: $S1"
 echo "== $(date -Is) stage 2: 2-step fine-tune"
 timeout --signal=INT 3h30m $PY -m hycom_emulator.nlam train_model --config_path nlam.yaml "${MODEL[@]}" \
   --epochs ${EPOCHS2:-100} --ar_steps_train 2 --load "$S1" --logger_run_name "$RUN_ID-s2" || echo "stage 2 exit $? (124 = time cap reached)"
-S2=$(best "$RUN_ID-s2"); echo "stage 2 best: $S2"
+S2=$(best "$RUN_ID-s2"); [ -n "$S2" ] || { echo "stage 2 left no checkpoint"; exit 1; }; echo "stage 2 best: $S2"
 echo "== $(date -Is) evaluate"
 for split in val test; do
   timeout 30m $PY -m hycom_emulator.evaluate_b00 nlam.yaml "$S2" "$OUT/scores_$split.json" --split $split --ar-steps 2 > /dev/null
