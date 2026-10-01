@@ -10,7 +10,7 @@ RUN_ID=$1
 OUT=$2
 DATA=${DATA:-/scratch/jmiranda/hycom-emulator-data/abozec_054_b00.zarr}
 PY=${PY:-/conda/jmiranda/venvs/hycom-emulator/bin/python}
-SHM=/dev/shm/jmiranda/$RUN_ID
+SHM=/dev/shm/$USER/$RUN_ID
 export CUDA_VISIBLE_DEVICES=${GPU:-0}
 export MLFLOW_TRACKING_URI=file:$OUT/mlruns MLFLOW_DISABLE_AGENT_HINT=1 OMP_NUM_THREADS=8
 MODEL=(--model graph_lam --graph multiscale --hidden_dim 128 --processor_layers 4 --batch_size 4
