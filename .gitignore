@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+*.pyc
+# data and outputs stay off git
+*.nc
+*.a
+*.b
+*.zarr/
+*.pth
+*.ckpt
+runs/
+wandb/
+mlruns/
