@@ -45,11 +45,13 @@ This lists every product a system kept and, for each cycle, which roles are pres
 
 ## Setup (skynet, GPU training)
 
+The code lives on the NFS home. The venv, uv cache and Python install go on the local disk `/conda`, because NFS is too slow for them (nespreso uses `/conda` for the same reason).
+
 ```bash
 git clone git@github.com:0jrm/hycom-emulator.git /unity/g2/jmiranda/hycom-emulator
-cd /unity/g2/jmiranda/hycom-emulator
-uv venv --python 3.12 .venv
-uv pip install -p .venv/bin/python -e ".[ml,test]" --torch-backend cu130
+export UV_CACHE_DIR=/conda/jmiranda/uv-cache UV_PYTHON_INSTALL_DIR=/conda/jmiranda/uv-python
+uv venv --python 3.12 /conda/jmiranda/venvs/hycom-emulator
+uv pip install -p /conda/jmiranda/venvs/hycom-emulator/bin/python -e "/unity/g2/jmiranda/hycom-emulator[ml,test]" --torch-backend cu130
 ```
 
 Training data is copied from RCC, never code. Use only GPUs 0–2 (workspace rule).
