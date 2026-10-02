@@ -122,11 +122,11 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
     prev = None
     for n in range(t.size):
         row = src.isel(cycle=n + 2)
-        st = np.nan_to_num(_to_grid_index(_stack(row, LAYER_STATE, SURFACE_STATE, "s00_", sl)))
+        st = np.nan_to_num(_to_grid_index(_stack(row, LAYER_STATE, SURFACE_STATE, "s00_", sl))).astype(np.float32)
         fo = _to_grid_index(IAU_WEIGHTS[0] * incs[0] + IAU_WEIGHTS[1] * incs[1])
         if atm_ds is not None:
             fo = np.concatenate([fo, _to_grid_index(_atm_24h(atm_ds, atm_names, t[n], sl))], axis=1)
-        fo = np.nan_to_num(fo)
+        fo = np.nan_to_num(fo).astype(np.float32)  # region writes keep the array's dtype, not the template's
         incs = [incs[1], _stack(row, LAYER_FORCING, (), "inc_", sl)]
         xr.Dataset(
             {"state": (("time", g, "state_feature"), st[None]), "forcing": (("time", g, "forcing_feature"), fo[None])}
