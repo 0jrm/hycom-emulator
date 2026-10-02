@@ -52,7 +52,8 @@ def test_projection_keeps_columns_positive_and_closed():
     stub = _Stub()
     mean, std = (torch.tensor(stub.stats[v].values) for v in ("state_mean", "state_std"))
     prev = _std(_state(rng), stub)
-    raw = prev + torch.tensor(rng.normal(scale=3, size=prev.shape).astype(np.float32), requires_grad=True)
+    delta = torch.tensor(rng.normal(scale=3, size=prev.shape).astype(np.float32), requires_grad=True)
+    raw = prev + delta
     out = project_thickness(raw, prev, mean, std, torch.tensor(TH))
     dp, dp0 = (a[..., TH] * std[TH] + mean[TH] for a in (out, prev))
     assert (dp >= 0).all()
@@ -60,7 +61,7 @@ def test_projection_keeps_columns_positive_and_closed():
     other = [i for i in range(len(NAMES)) if i not in TH]
     torch.testing.assert_close(out[..., other], raw[..., other])
     out.sum().backward()
-    assert torch.isfinite(raw.grad).all()
+    assert torch.isfinite(delta.grad).all()
 
 
 def test_plain_settings_reduce_to_wmse():
