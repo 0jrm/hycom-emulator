@@ -91,7 +91,8 @@ class Accumulator:
         return out
 
 
-def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps: int = 2) -> dict:
+def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int):
+    """(datastore, WeatherDataset of the split, forecaster module or None)."""
     import torch
     from neural_lam.config import load_config_and_datastore
     from neural_lam.weather_dataset import WeatherDataset
@@ -106,6 +107,11 @@ def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         module = load_forecaster_module_from_checkpoint(str(ckpt), config, ds).to(device).eval()
+    return ds, data, module
+
+
+def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps: int = 2) -> dict:
+    ds, data, module = load(config_path, ckpt, split, ar_steps)
     head = {"split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt) if ckpt else None}
     if not ds.is_ensemble:
         return head | _score(ds, data, module, split, ar_steps, range(len(data)), None)
@@ -115,35 +121,24 @@ def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps
 
 
 def _score(ds, data, module, split, ar_steps, indices, member) -> dict:
-    import torch
-
     names = ds.get_vars_names("state")
-    fnames = ds.get_vars_names("forcing")
     interior = ~ds.boundary_mask.values.astype(bool)
     lat = ds.get_dataarray("static", None).sel(static_feature="lat").values
     area = np.cos(np.deg2rad(lat))[interior] ** 2
     forcing = ds.get_dataarray("forcing", split)
     if member is not None:
         forcing = forcing.sel(ensemble_member=member)
-    inc_cols = {i: fnames.index(f"inc_{n}") for i, n in enumerate(names) if f"inc_{n}" in fnames}
+    inc_cols = increment_columns(ds)
     acc = Accumulator()
     for idx in indices:
-        init_states, target_states, forc, times = data[idx]
-        model_pred = None
-        if module is not None:
-            batch = tuple(t[None].to(module.device) for t in (init_states, target_states, forc, times))
-            with torch.no_grad():
-                batch = module.on_after_batch_transfer(batch, 0)
-                pred, _, _, _ = module.common_step(batch)
-            model_pred = (pred[0].cpu() * module.state_std.cpu() + module.state_mean.cpu()).numpy()
+        sample = data[idx]
+        init_states, target_states, _, times = sample
+        model_pred = forecast(module, sample) if module is not None else None
         x0 = init_states[-1].numpy()
-        persist_inc = x0.copy()
+        persist_inc = persistence_inc(x0, forcing, times, inc_cols)
         for lead in range(ar_steps):
             true = target_states[lead].numpy()
-            f_t = forcing.sel(time=np.datetime64(int(times[lead]), "ns")).values
-            for i, j in inc_cols.items():
-                persist_inc[:, i] += f_t[:, j]
-            preds = {"persistence": x0, "persistence_inc": persist_inc.copy()}
+            preds = {"persistence": x0, "persistence_inc": persist_inc[lead]}
             if model_pred is not None:
                 preds["model"] = model_pred[lead]
             fv_true = field_values(true[interior], names)
@@ -156,6 +151,34 @@ def _score(ds, data, module, split, ar_steps, indices, member) -> dict:
     if module is not None:
         res["verdict"] = verdict(res["scores"])
     return res
+
+
+def forecast(module, sample) -> np.ndarray:
+    """(ar_steps, grid, state_feature) model forecast in physical units for one WeatherDataset sample."""
+    import torch
+
+    batch = tuple(t[None].to(module.device) for t in sample)
+    with torch.no_grad():
+        batch = module.on_after_batch_transfer(batch, 0)
+        pred, _, _, _ = module.common_step(batch)
+    return (pred[0].cpu() * module.state_std.cpu() + module.state_mean.cpu()).numpy()
+
+
+def persistence_inc(x0: np.ndarray, forcing, times, inc_cols: dict[int, int]) -> np.ndarray:
+    """(ar_steps, grid, state_feature): x0 plus the IAU share of the increments accumulated by each lead."""
+    out, x = [], x0.copy()
+    for t in times:
+        f_t = forcing.sel(time=np.datetime64(int(t), "ns")).values
+        for i, j in inc_cols.items():
+            x[:, i] += f_t[:, j]
+        out.append(x.copy())
+    return np.stack(out)
+
+
+def increment_columns(ds) -> dict[int, int]:
+    """State column -> forcing column of its increment (T, S, thickness layers)."""
+    names, fnames = ds.get_vars_names("state"), ds.get_vars_names("forcing")
+    return {i: fnames.index(f"inc_{n}") for i, n in enumerate(names) if f"inc_{n}" in fnames}
 
 
 def verdict(scores: dict, partner_min: float = 0.0) -> dict:
