@@ -6,7 +6,7 @@ ranked, pooled over ensemble members, and the best, median and worst are drawn:
 
   samples.json                 skill of every sample, best first
   surface_<rank>.png           top-layer target, model, model - target, persistence+inc - target for every
-                               state variable (thknss_k01 only if it changes)
+                               state variable (thknss_k01 only if it varies by over 1 mm)
   section_<rank>_<lat|lon>.png target, model - target and persistence+inc - target of T, S, u, v on a
                                section, layers drawn between the target's interface depths
 
@@ -136,7 +136,7 @@ def _surface_vars(names, true):
         ("u barotropic (m/s)", lambda x: x[:, col["ubaro"]]),
         ("v barotropic (m/s)", lambda x: x[:, col["vbaro"]]),
     ]
-    if np.ptp(true[:, col["thknss_k01"]]) > 0:
+    if np.ptp(true[:, col["thknss_k01"]]) > 1e-3 * ONEM:  # 05.3 and the twins hold it at 1 m (float noise 1e-7 m)
         out.append(("thknss k01 (m)", lambda x: x[:, col["thknss_k01"]] / ONEM))
     return out
 
