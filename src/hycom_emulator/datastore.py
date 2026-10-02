@@ -2,15 +2,16 @@
 
 The config is a small YAML next to nothing in particular:
 
-    zarr: /path/to/b00.zarr
+    zarr: /path/to/b00.zarr     # a prepare_b00 zarr, or a pack_b00 folder
     splits:
       train: [2025-03-04, 2025-07-31]
       val:   [2025-08-06, 2025-08-15]
       test:  [2025-08-21, 2025-09-01]
 
 Importing this module registers the datastore kind `hycom` with neural-lam.
-The zarr is loaded into memory: per-sample reads through dask cost about 1.9 s at full resolution
-against 0.4 s from RAM, which left the GPU idle. The full B00 export takes about 50 GB.
+Training reads a pack_b00 folder staged in /dev/shm: state and forcing are memory-mapped .npy,
+so the DataLoader workers (forked, see nlam.py) share one copy of the pages and nothing is
+decoded per sample. A zarr opens lazily (no dask, so forking stays safe); fine for tests and scoring.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ class HycomDatastore(BaseRegularGridDatastore):
     def __init__(self, config_path: str | Path):
         self._config_path = Path(config_path)
         self._config = yaml.safe_load(self._config_path.read_text())
-        self._ds = xr.open_zarr(self._config["zarr"], consolidated=True, chunks=None).load()
+        self._ds = _open(Path(self._config["zarr"]))
         for split in ("train", "val", "test"):
             if split not in self._config["splits"]:
                 raise ValueError(f"{config_path}: missing split {split}")
@@ -106,5 +107,16 @@ class HycomDatastore(BaseRegularGridDatastore):
     def state_feature_weights_values(self) -> list[float]:
         return [1.0] * self.get_num_data_vars("state")
 
+
+def _open(path: Path) -> xr.Dataset:
+    if not (path / "meta.zarr").is_dir():
+        return xr.open_zarr(path, consolidated=True, chunks=None)  # lazy without dask: safe to fork
+    ds = xr.open_zarr(path / "meta.zarr", consolidated=True, chunks=None).load()
+    for name in PACKED:
+        ds[name] = (("time", "grid_index", f"{name}_feature"), np.load(path / f"{name}.npy", mmap_mode="r"))
+    return ds
+
+
+PACKED = ("state", "forcing")
 
 DATASTORES[HycomDatastore.SHORT_NAME] = HycomDatastore

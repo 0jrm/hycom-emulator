@@ -70,3 +70,29 @@ def test_no_channel_dominates_the_loss(stores):
     _, cfg = stores
     r = HycomDatastore(cfg).get_standardization_dataarray("state").state_diff_std_standardized.values
     assert np.isfinite(r).all() and r.min() >= DIFF_STD_FLOOR * (1 - 1e-6)
+
+
+def test_pack_matches_zarr(stores, tmp_path):
+    from hycom_emulator.datastore import HycomDatastore
+    from hycom_emulator.pack_b00 import pack
+
+    _, cfg = stores
+    zarr_path = Path(yaml_zarr(cfg))
+    pack(zarr_path, tmp_path / "packed")
+    packed_cfg = tmp_path / "b00.yaml"
+    packed_cfg.write_text(cfg.read_text().replace(str(zarr_path), str(tmp_path / "packed")))
+    a, b = HycomDatastore(cfg), HycomDatastore(packed_cfg)
+    for cat in ("state", "forcing", "static"):
+        for split in ("train", "val"):
+            x, y = a.get_dataarray(cat, split), b.get_dataarray(cat, split)
+            assert y.dtype == np.float32 and x.dtype == np.float32
+            np.testing.assert_array_equal(x.values, y.values)
+    xs, ys = a.get_standardization_dataarray("state"), b.get_standardization_dataarray("state")
+    for v in xs:
+        np.testing.assert_array_equal(xs[v].values, ys[v].values)
+
+
+def yaml_zarr(cfg):
+    import yaml
+
+    return yaml.safe_load(cfg.read_text())["zarr"]

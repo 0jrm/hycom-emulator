@@ -1,6 +1,7 @@
 #!/bin/bash
 # Train and score B00 on skynet. usage: train_b00.sh <run_id> <out_dir>
-# Stages the B00 zarr into /dev/shm and removes it on exit. Each stage has a hard time cap,
+# Stages the B00 data (a pack_b00 folder; a zarr also works) into /dev/shm and removes it on
+# exit. Each stage has a hard time cap,
 # so the whole run stays under the card's GPU-hour budget: graph 30 min, stage 1 (1-step) 7 h,
 # stage 2 (2-step) 3.5 h, evaluation 30 min. Stage 2 resumes stage 1's best val checkpoint
 # (neural-lam --load restores epoch, optimizer and the best val score), so it runs EPOCHS2 more
@@ -11,7 +12,7 @@
 set -euo pipefail
 RUN_ID=$1
 OUT=$2
-DATA=${DATA:-/scratch/jmiranda/hycom-emulator-data/abozec_054_b00atm.zarr}
+DATA=${DATA:-/scratch/jmiranda/hycom-emulator-data/abozec_054_b00atm2.pack}
 PY=${PY:-/conda/jmiranda/venvs/hycom-emulator/bin/python}
 SHM=/dev/shm/$USER/$RUN_ID
 export CUDA_VISIBLE_DEVICES=${GPU:-0}
@@ -25,9 +26,9 @@ MODEL=(--model graph_lam --graph multiscale --hidden_dim 128 --processor_layers 
 mkdir -p "$OUT" "$SHM"
 trap 'rm -rf "$SHM"' EXIT
 echo "== $(date -Is) stage data to $SHM"
-rsync -a "$DATA/" "$SHM/b00.zarr/"
+rsync -a "$DATA/" "$SHM/b00/"
 cat > "$OUT/b00.yaml" <<YAML
-zarr: $SHM/b00.zarr
+zarr: $SHM/b00
 splits:
   train: [2025-03-04, 2025-07-31]
   val: [2025-08-06, 2025-08-15]
