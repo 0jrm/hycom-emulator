@@ -124,7 +124,7 @@ class Grid:
         return i * self.ny + np.arange(self.ny), self.lat, float(self.lon[i])
 
 
-def _surface_vars(names, true):
+def _surface_vars(names, true, interior):
     col = {n: i for i, n in enumerate(names)}
     out = [
         ("T k01 (degC)", lambda x: x[:, col["temp_k01"]]),
@@ -136,7 +136,7 @@ def _surface_vars(names, true):
         ("u barotropic (m/s)", lambda x: x[:, col["ubaro"]]),
         ("v barotropic (m/s)", lambda x: x[:, col["vbaro"]]),
     ]
-    if np.ptp(true[:, col["thknss_k01"]]) > 1e-3 * ONEM:  # 05.3 and the twins hold it at 1 m (float noise 1e-7 m)
+    if np.ptp(true[interior, col["thknss_k01"]]) > 1e-3 * ONEM:  # 05.3 and the twins hold it at 1 m (land holds 0)
         out.append(("thknss k01 (m)", lambda x: x[:, col["thknss_k01"]] / ONEM))
     return out
 
@@ -155,7 +155,7 @@ def plot_surface(grid, names, c, title, path):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    rows = _surface_vars(names, c.true)
+    rows = _surface_vars(names, c.true, ~grid.blank)
     fig, axes = plt.subplots(len(rows), 4, figsize=(19, 3.4 * len(rows)), constrained_layout=True)
     for r, (label, f) in enumerate(rows):
         true, model, pinc = (grid.map(f(x)) for x in (c.true, c.model, c.pinc))
