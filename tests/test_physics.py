@@ -11,6 +11,7 @@ from hycom_emulator.physics import CONTEXT, ONEM, apply_arm, group_weights, hyco
 L = 3
 NAMES = [f"{v}_k{k:02d}" for v in ("temp", "salin", "thknss", "u", "v") for k in range(1, L + 1)] + ["srfhgt", "montg1", "ubaro", "vbaro"]
 TH = layer_columns(NAMES, "thknss")
+VAR = torch.tensor([1e-4, 1.0, 4.0]) * ONEM**2  # change variance: top layer near-fixed, bottom most variable
 
 
 class _Stub:
@@ -54,7 +55,7 @@ def test_projection_keeps_columns_positive_and_closed():
     prev = _std(_state(rng), stub)
     delta = torch.tensor(rng.normal(scale=3, size=prev.shape).astype(np.float32), requires_grad=True)
     raw = prev + delta
-    out = project_thickness(raw, prev, mean, std, torch.tensor(TH))
+    out = project_thickness(raw, prev, mean, std, torch.tensor(TH), VAR)
     dp, dp0 = (a[..., TH] * std[TH] + mean[TH] for a in (out, prev))
     assert (dp >= 0).all()
     torch.testing.assert_close(dp.sum(-1), dp0.sum(-1), rtol=1e-5, atol=1e-2)
@@ -64,19 +65,21 @@ def test_projection_keeps_columns_positive_and_closed():
     assert torch.isfinite(delta.grad).all()
 
 
-def test_projection_leaves_upper_layers_alone_when_the_column_has_room():
+def test_projection_spreads_the_shortfall_by_change_variance():
     stub = _Stub()
     mean, std = (torch.tensor(stub.stats[v].values) for v in ("state_mean", "state_std"))
     prev = _state(np.random.default_rng(5))
     prev[..., TH] = np.array([1.0, 10.0, 89.0]) * ONEM  # column of 100 m
     new = prev.copy()
     new[..., TH] = np.array([1.0, 12.0, 80.0]) * ONEM  # 7 m short: the bottom layer absorbs it
-    out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH))
+    out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH), VAR)
     dp = (out[..., TH] * std[TH] + mean[TH]).numpy() / ONEM
-    np.testing.assert_allclose(dp[0, 0], [1.0, 12.0, 87.0], rtol=1e-5)
-    new[..., TH] = np.array([1.0, 12.0, 95.0]) * ONEM  # 8 m too deep: the bottom layer gives it back
-    out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH))
-    np.testing.assert_allclose((out[..., TH] * std[TH] + mean[TH]).numpy()[0, 0] / ONEM, [1.0, 12.0, 87.0], rtol=1e-5)
+    share = np.array([1e-4, 1.0, 4.0]) / 5.0001  # the 7 m shortfall, spread by change variance
+    np.testing.assert_allclose(dp[0, 0], [1.0, 12.0, 80.0] + 7 * share, rtol=1e-5)
+    assert abs(dp[0, 0, 0] - 1.0) < 1e-3  # the near-fixed top layer barely moves
+    new[..., TH] = np.array([1.0, 12.0, 95.0]) * ONEM  # 8 m too deep
+    out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH), VAR)
+    np.testing.assert_allclose((out[..., TH] * std[TH] + mean[TH]).numpy()[0, 0] / ONEM, [1.0, 12.0, 95.0] - 8 * share, rtol=1e-5)
 
 
 
@@ -87,9 +90,10 @@ def test_projection_keeps_empty_bottom_layers_empty():
     prev[..., TH] = np.array([1.0, 99.0, 0.0]) * ONEM  # the deepest layer is empty
     new = prev.copy()
     new[..., TH] = np.array([1.0, 90.0, 0.5]) * ONEM
-    out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH))
+    out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH), VAR)
     dp = (out[..., TH] * std[TH] + mean[TH]).numpy()[0, 0] / ONEM
-    np.testing.assert_allclose(dp, [1.0, 98.5, 0.5], rtol=1e-5)  # the 8.5 m shortfall goes to layer 2, not 3
+    share = np.array([1e-4, 1.0]) / 1.0001  # the 8.5 m shortfall goes to the layers with mass, by change variance
+    np.testing.assert_allclose(dp, [1.0 + 8.5 * share[0], 90.0 + 8.5 * share[1], 0.5], rtol=1e-5)
 
 
 def test_plain_settings_reduce_to_wmse():

@@ -5,8 +5,8 @@ in the 05.3 archives). B00 trained with neural-lam's channel-wise wmse breaks bo
 2026-10-02): 11% of (point, layer) thicknesses below -1 cm, column sums off by 0.4 m RMS.
 
 - project_thickness: relu on every layer thickness, then each column closed at the column sum of the
-  previous state the way HYCOM does it, the deepest layer with mass taking the remainder (exact,
-  differentiable).
+  previous state, the shortfall spread over layers with mass by their 24 h change variance (the
+  least-squares correction under wmse; exact, differentiable).
   `hycom_graph_lam` is GraphLAM with this projection after neural-lam's residual update; it has
   GraphLAM's weights, so it loads GraphLAM checkpoints.
 - hycom_wmse: neural-lam's wmse with T, S, u and v layer entries weighted by the true layer thickness
@@ -58,20 +58,22 @@ def layer_columns(names: list[str], var: str) -> list[int]:
     return sorted((i for i, n in enumerate(names) if n.startswith(f"{var}_k")), key=lambda i: names[i])
 
 
-def project_thickness(state, prev_state, mean, std, th):
-    """state, prev_state: (..., grid, feature) standardized. Thickness columns th become >= 0 and each
-    column sums to prev_state's column sum, the way HYCOM closes a column: interfaces are accumulated
-    from the top and clipped at the bottom, and a shortfall goes to the deepest layer that holds mass
-    in prev_state. Other layers keep their predicted thickness while the column has room, so the fixed
-    z-level layers at the top are not moved (a proportional rescale moved them), and layers that are
-    empty everywhere stay empty (05.3's thknss_k41 has a state std of 8e-10 Pa, so any thickness put
-    there swamps wmse). Other features are untouched."""
+def project_thickness(state, prev_state, mean, std, th, change_var):
+    """state, prev_state: (..., grid, feature) standardized; change_var: (thickness layers,) variance of
+    each layer's 24 h thickness change (Pa^2). Thickness columns th become >= 0 and each column sums to
+    prev_state's column sum. The shortfall is spread over the layers that hold mass in prev_state in
+    proportion to change_var: the least-squares correction under wmse's own metric, so the fixed
+    z-level layers at the top (tiny change variance) barely move and empty layers stay empty. Rounding
+    left by positivity is closed the way HYCOM closes a column: interfaces clipped at the bottom, the
+    remainder to the deepest layer with mass. Other features are untouched."""
     dp = torch.relu(state[..., th] * std[th] + mean[th])
     prev = torch.relu(prev_state[..., th] * std[th] + mean[th])
     total = prev.sum(-1, keepdim=True)
+    has_mass = prev > MASSLESS
+    w = has_mass * change_var
+    dp = torch.relu(dp + (total - dp.sum(-1, keepdim=True)) * w / w.sum(-1, keepdim=True).clamp_min(1e-12))
     interfaces = torch.cat([torch.zeros_like(total), torch.minimum(torch.cumsum(dp, -1), total)], -1)
     dp = interfaces[..., 1:] - interfaces[..., :-1]
-    has_mass = prev > MASSLESS
     deepest = has_mass & (torch.cumsum(has_mass.flip(-1).int(), -1).flip(-1) == 1)  # last layer with mass
     dp = dp + deepest * (total - interfaces[..., -1:])
     out = state.clone()
@@ -83,12 +85,16 @@ class HycomGraphLAM(GraphLAM):
     def __init__(self, *args, datastore, **kwargs):
         super().__init__(*args, datastore=datastore, **kwargs)
         names = datastore.get_vars_names("state")
-        self.register_buffer("thickness_idx", torch.tensor(layer_columns(names, "thknss")), persistent=False)
+        th = torch.tensor(layer_columns(names, "thknss"))
+        self.register_buffer("thickness_idx", th, persistent=False)
+        stats = datastore.get_standardization_dataarray("state")
+        change_std = (stats.state_diff_std_standardized * stats.state_std).values[th.numpy()]  # Pa
+        self.register_buffer("thickness_change_var", torch.tensor(change_std, dtype=torch.float32) ** 2, persistent=False)
         CONTEXT.configure(datastore)
 
     def get_clamped_new_state(self, state_delta, prev_state):
         new_state = super().get_clamped_new_state(state_delta, prev_state)
-        return project_thickness(new_state, prev_state, self.state_mean, self.state_std, self.thickness_idx)
+        return project_thickness(new_state, prev_state, self.state_mean, self.state_std, self.thickness_idx, self.thickness_change_var)
 
 
 class _Context:
