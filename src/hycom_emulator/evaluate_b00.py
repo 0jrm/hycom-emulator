@@ -9,7 +9,8 @@ the nest band, where neural-lam overwrites predictions with the truth.
 For each field and lead:  rmse_model, rmse_persistence, rmse_persistence_inc (state + the IAU
 share of increments added over the step; T, S, thknss only), and corr_change: the weighted
 correlation between predicted and true change from the initial state. Persistence predicts no
-change, so it has no corr_change.
+change, so it has no corr_change. An ensemble datastore (stack_b00) is scored member by member:
+the result then holds one score set and verdict per member under "members".
 
 Run `python -m hycom_emulator.evaluate_b00 <nlam.yaml> <ckpt|none> <out.json> [--split test] [--ar-steps 2]`.
 """
@@ -98,24 +99,35 @@ def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps
     import hycom_emulator.datastore  # noqa: F401  registers the hycom kind
 
     config, ds = load_config_and_datastore(config_path=str(config_path))
-    names = ds.get_vars_names("state")
-    fnames = ds.get_vars_names("forcing")
-    interior = ~ds.boundary_mask.values.astype(bool)
-    lat = ds.get_dataarray("static", None).sel(static_feature="lat").values
-    area = np.cos(np.deg2rad(lat))[interior] ** 2
-    forcing = ds.get_dataarray("forcing", split)
     data = WeatherDataset(ds, split=split, ar_steps=ar_steps, num_past_forcing_steps=1, num_future_forcing_steps=1)
-
     module = None
     if ckpt is not None:
         from neural_lam.train_model import load_forecaster_module_from_checkpoint
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         module = load_forecaster_module_from_checkpoint(str(ckpt), config, ds).to(device).eval()
+    head = {"split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt) if ckpt else None}
+    if not ds.is_ensemble:
+        return head | _score(ds, data, module, split, ar_steps, range(len(data)), None)
+    members = ds.get_dataarray("state", split)["ensemble_member"].values.tolist()
+    # WeatherDataset index = sample * n_members + member
+    return head | {"members": {m: _score(ds, data, module, split, ar_steps, range(i, len(data), len(members)), m) for i, m in enumerate(members)}}
 
+
+def _score(ds, data, module, split, ar_steps, indices, member) -> dict:
+    import torch
+
+    names = ds.get_vars_names("state")
+    fnames = ds.get_vars_names("forcing")
+    interior = ~ds.boundary_mask.values.astype(bool)
+    lat = ds.get_dataarray("static", None).sel(static_feature="lat").values
+    area = np.cos(np.deg2rad(lat))[interior] ** 2
+    forcing = ds.get_dataarray("forcing", split)
+    if member is not None:
+        forcing = forcing.sel(ensemble_member=member)
     inc_cols = {i: fnames.index(f"inc_{n}") for i, n in enumerate(names) if f"inc_{n}" in fnames}
     acc = Accumulator()
-    for idx in range(len(data)):
+    for idx in indices:
         init_states, target_states, forc, times = data[idx]
         model_pred = None
         if module is not None:
@@ -140,14 +152,10 @@ def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps
             w = weights(true[interior], names, area)
             for field in FIELDS:
                 acc.add((field, lead + 1), fv_true[field], fv_init[field], w[field], {k: v[field] for k, v in fv_pred.items()})
-    return {
-        "split": split,
-        "samples": len(data),
-        "ar_steps": ar_steps,
-        "checkpoint": str(ckpt) if ckpt else None,
-        "interior_points": int(interior.sum()),
-        "scores": acc.result(),
-    }
+    res = {"samples": len(indices), "interior_points": int(interior.sum()), "scores": acc.result()}
+    if module is not None:
+        res["verdict"] = verdict(res["scores"])
+    return res
 
 
 def verdict(scores: dict, partner_min: float = 0.0) -> dict:
@@ -170,8 +178,6 @@ def main() -> None:
     a = p.parse_args()
     ckpt = None if a.ckpt == "none" else Path(a.ckpt)
     res = evaluate(a.config, ckpt, a.split, a.ar_steps)
-    if ckpt is not None:
-        res["verdict"] = verdict(res["scores"])
     a.out.write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 

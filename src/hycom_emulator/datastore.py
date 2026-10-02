@@ -12,6 +12,8 @@ Importing this module registers the datastore kind `hycom` with neural-lam.
 Training reads a pack_b00 folder staged in /dev/shm: state and forcing are memory-mapped .npy,
 so the DataLoader workers (forked, see nlam.py) share one copy of the pages and nothing is
 decoded per sample. A zarr opens lazily (no dask, so forking stays safe); fine for tests and scoring.
+A stack_b00 folder has a leading ensemble_member axis: neural-lam then draws each sample from one
+member, so every member is a separate run over the same dates.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ class HycomDatastore(BaseRegularGridDatastore):
         self._config_path = Path(config_path)
         self._config = yaml.safe_load(self._config_path.read_text())
         self._ds = _open(Path(self._config["zarr"]))
+        self.is_ensemble = self.has_ensemble_forcing = "ensemble_member" in self._ds["state"].dims
         for split in ("train", "val", "test"):
             if split not in self._config["splits"]:
                 raise ValueError(f"{config_path}: missing split {split}")
@@ -113,7 +116,9 @@ def _open(path: Path) -> xr.Dataset:
         return xr.open_zarr(path, consolidated=True, chunks=None)  # lazy without dask: safe to fork
     ds = xr.open_zarr(path / "meta.zarr", consolidated=True, chunks=None).load()
     for name in PACKED:
-        ds[name] = (("time", "grid_index", f"{name}_feature"), np.load(path / f"{name}.npy", mmap_mode="r"))
+        arr = np.load(path / f"{name}.npy", mmap_mode="r")
+        dims = ("time", "grid_index", f"{name}_feature")
+        ds[name] = (("ensemble_member", *dims) if arr.ndim == 4 else dims, arr)
     return ds
 
 
