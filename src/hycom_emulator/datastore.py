@@ -9,6 +9,8 @@ The config is a small YAML next to nothing in particular:
       test:  [2025-08-21, 2025-09-01]
 
 Importing this module registers the datastore kind `hycom` with neural-lam.
+The zarr is loaded into memory: per-sample reads through dask cost about 1.9 s at full resolution
+against 0.4 s from RAM, which left the GPU idle. The full B00 export takes about 50 GB.
 """
 
 from __future__ import annotations
@@ -33,7 +35,7 @@ class HycomDatastore(BaseRegularGridDatastore):
     def __init__(self, config_path: str | Path):
         self._config_path = Path(config_path)
         self._config = yaml.safe_load(self._config_path.read_text())
-        self._ds = xr.open_zarr(self._config["zarr"], consolidated=True)
+        self._ds = xr.open_zarr(self._config["zarr"], consolidated=True, chunks=None).load()
         for split in ("train", "val", "test"):
             if split not in self._config["splits"]:
                 raise ValueError(f"{config_path}: missing split {split}")
