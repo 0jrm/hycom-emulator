@@ -164,4 +164,4 @@ def test_arm_configs_load_in_neural_lam(tmp_path):
         else:
             assert args == ["--model", "hycom_graph_lam", "--loss", "hycom_wmse"]
             assert sum(cfg.training.state_feature_weighting.weights.values()) == pytest.approx(1.0)
-            assert ds.config["physics"]["density"] == (1 / 9 if arm == "penalties" else 0.0)
+            assert (ds.config["physics"]["density"] > 0) == (arm == "penalties")

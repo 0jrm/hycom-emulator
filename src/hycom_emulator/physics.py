@@ -44,8 +44,10 @@ ARMS = {
     "project": {"model": "hycom_graph_lam", "loss": "wmse"},
     "reweight": {"model": "hycom_graph_lam", "loss": "hycom_wmse", "group_weights": True,
                  "physics": {"thickness_weighted": True, "density": 0.0, "stability": 0.0}},
+    # Penalty weights: each penalty is 1/9 of the base loss (one variable group's share) at E1's
+    # checkpoint, measured on 8 train samples (explore-physcheck/calibrate.log, 2026-10-02).
     "penalties": {"model": "hycom_graph_lam", "loss": "hycom_wmse", "group_weights": True,
-                  "physics": {"thickness_weighted": True, "density": 1 / 9, "stability": 1 / 9}},
+                  "physics": {"thickness_weighted": True, "density": 5.72e-4, "stability": 7.89e-2}},
 }
 
 
