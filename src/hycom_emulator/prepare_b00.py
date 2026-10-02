@@ -180,12 +180,13 @@ class TrainStats:
         import xarray as xr
 
         a = self.acc
+        diff_std = np.sqrt(a["diff"].m2 / a["diff"].n).astype(np.float32)  # floor a zero change before _safe
         return xr.Dataset(
             {
                 "state_mean": (("state_feature",), a["state"].mean),
                 "state_std": (("state_feature",), a["state"].std),
                 "state_diff_mean": (("state_feature",), a["diff"].mean),
-                "state_diff_std": (("state_feature",), np.maximum(a["diff"].std, DIFF_STD_FLOOR * a["state"].std)),
+                "state_diff_std": (("state_feature",), _safe(np.maximum(diff_std, DIFF_STD_FLOOR * a["state"].std))),
                 "forcing_mean": (("forcing_feature",), a["forcing"].mean),
                 "forcing_std": (("forcing_feature",), a["forcing"].std),
                 "static_mean": (("static_feature",), static.mean(axis=0)),
