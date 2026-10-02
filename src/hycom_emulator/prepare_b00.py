@@ -25,8 +25,6 @@ from pathlib import Path
 
 import numpy as np
 
-from gom_da.eval.hycom_archive import Grid, read_rec
-
 BAND_EFOLD_DAYS = 10.0
 DIFF_STD_FLOOR = 0.05
 LAYER_STATE = ("temp", "salin", "thknss", "u", "v")
@@ -57,6 +55,8 @@ def _to_grid_index(a):
 
 
 def band_mask(rmu_a: Path, ny: int, nx: int, sl) -> np.ndarray:
+    from gom_da.eval.hycom_archive import Grid, read_rec  # RCC only; stack_b00 runs on skynet
+
     grid = Grid(nx, ny, 1, np.empty(0), np.empty(0))
     rmu = read_rec(rmu_a, 0, grid)
     rmu = np.where(np.abs(rmu) < 1e29, rmu, 0.0)
