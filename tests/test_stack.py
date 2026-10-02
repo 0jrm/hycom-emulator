@@ -31,6 +31,7 @@ def _static():
 def _run(rng, free: bool, atm: np.ndarray):
     state = rng.normal(size=(T, NX * NY, len(STATE))).astype(np.float32)
     state[:, :, 2] = 50.0 + np.arange(NX * NY)  # a fixed layer thickness: its change std needs the floor
+    state[:, :, 6] = 3.0  # constant everywhere, like 05.3's thknss_k01
     forcing = np.concatenate([np.zeros((T, NX * NY, 3)) if free else rng.normal(size=(T, NX * NY, 3)), atm], axis=2)
     return state, forcing.astype(np.float32)
 
@@ -86,10 +87,12 @@ def test_statistics_pool_all_runs(runs):
     diff = np.concatenate([np.diff(s[train][:, ocean].astype(np.float64), axis=0) for s, _ in arrays.values()])
     st, fo, diff = (a.reshape(-1, a.shape[-1]) for a in (st, fo, diff))
     np.testing.assert_allclose(meta.state_mean, st.mean(0), rtol=1e-5)
-    np.testing.assert_allclose(meta.state_std, st.std(0), rtol=1e-5)
+    np.testing.assert_allclose(meta.state_std, np.where(st.std(0) > 0, st.std(0), 1.0), rtol=1e-5)
     np.testing.assert_allclose(meta.forcing_std, fo.std(0), rtol=1e-5)  # not the free run's placeholder 1
-    np.testing.assert_allclose(meta.state_diff_std, np.maximum(diff.std(0), DIFF_STD_FLOOR * st.std(0)), rtol=1e-5, atol=1e-7)
+    expected = np.maximum(diff.std(0), DIFF_STD_FLOOR * st.std(0))
+    np.testing.assert_allclose(meta.state_diff_std, np.where(expected > 0, expected, 1.0), rtol=1e-5, atol=1e-7)
     assert float(meta.state_diff_std[2]) == pytest.approx(DIFF_STD_FLOOR * float(meta.state_std[2]))
+    assert float(meta.state_std[6]) == float(meta.state_diff_std[6]) == 1.0  # constant everywhere: placeholders
     assert meta.ensemble_member.values.tolist() == ["free", "twin"]
 
 
