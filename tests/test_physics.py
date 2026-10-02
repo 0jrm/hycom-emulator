@@ -79,6 +79,19 @@ def test_projection_leaves_upper_layers_alone_when_the_column_has_room():
     np.testing.assert_allclose((out[..., TH] * std[TH] + mean[TH]).numpy()[0, 0] / ONEM, [1.0, 12.0, 87.0], rtol=1e-5)
 
 
+
+def test_projection_keeps_empty_bottom_layers_empty():
+    stub = _Stub()
+    mean, std = (torch.tensor(stub.stats[v].values) for v in ("state_mean", "state_std"))
+    prev = _state(np.random.default_rng(6))
+    prev[..., TH] = np.array([1.0, 99.0, 0.0]) * ONEM  # the deepest layer is empty
+    new = prev.copy()
+    new[..., TH] = np.array([1.0, 90.0, 0.5]) * ONEM
+    out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH))
+    dp = (out[..., TH] * std[TH] + mean[TH]).numpy()[0, 0] / ONEM
+    np.testing.assert_allclose(dp, [1.0, 98.5, 0.5], rtol=1e-5)  # the 8.5 m shortfall goes to layer 2, not 3
+
+
 def test_plain_settings_reduce_to_wmse():
     rng = np.random.default_rng(1)
     stub = _Stub()

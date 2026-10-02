@@ -5,7 +5,8 @@ in the 05.3 archives). B00 trained with neural-lam's channel-wise wmse breaks bo
 2026-10-02): 11% of (point, layer) thicknesses below -1 cm, column sums off by 0.4 m RMS.
 
 - project_thickness: relu on every layer thickness, then each column closed at the column sum of the
-  previous state the way HYCOM does it, the bottom layer taking the remainder (exact, differentiable).
+  previous state the way HYCOM does it, the deepest layer with mass taking the remainder (exact,
+  differentiable).
   `hycom_graph_lam` is GraphLAM with this projection after neural-lam's residual update; it has
   GraphLAM's weights, so it loads GraphLAM checkpoints.
 - hycom_wmse: neural-lam's wmse with T, S, u and v layer entries weighted by the true layer thickness
@@ -31,6 +32,7 @@ from neural_lam.models import MODELS
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 
 ONEM = 9806.0  # Pa of layer thickness per metre
+MASSLESS = 1e-3 * ONEM  # Pa: a layer thinner than 1 mm holds no mass
 RHO_REF = 0.01  # kg/m3: density error that costs as much as one standardized change
 LAYERED = ("temp", "salin", "thknss", "u", "v")
 WEIGHTED_BY_THICKNESS = ("temp", "salin", "u", "v")
@@ -59,15 +61,19 @@ def layer_columns(names: list[str], var: str) -> list[int]:
 def project_thickness(state, prev_state, mean, std, th):
     """state, prev_state: (..., grid, feature) standardized. Thickness columns th become >= 0 and each
     column sums to prev_state's column sum, the way HYCOM closes a column: interfaces are accumulated
-    from the top, clipped at the bottom, and the bottom layer takes the remainder. Layers above the
-    bottom keep their predicted thickness while the column has room, so the fixed z-level layers at the
-    top are not moved (a proportional rescale moved them, and wmse weighs their tiny changes heavily).
-    Other features are untouched."""
+    from the top and clipped at the bottom, and a shortfall goes to the deepest layer that holds mass
+    in prev_state. Other layers keep their predicted thickness while the column has room, so the fixed
+    z-level layers at the top are not moved (a proportional rescale moved them), and layers that are
+    empty everywhere stay empty (05.3's thknss_k41 has a state std of 8e-10 Pa, so any thickness put
+    there swamps wmse). Other features are untouched."""
     dp = torch.relu(state[..., th] * std[th] + mean[th])
-    total = torch.relu(prev_state[..., th] * std[th] + mean[th]).sum(-1, keepdim=True)
-    interfaces = torch.minimum(torch.cumsum(dp, -1)[..., :-1], total)
-    interfaces = torch.cat([torch.zeros_like(total), interfaces, total], -1)
+    prev = torch.relu(prev_state[..., th] * std[th] + mean[th])
+    total = prev.sum(-1, keepdim=True)
+    interfaces = torch.cat([torch.zeros_like(total), torch.minimum(torch.cumsum(dp, -1), total)], -1)
     dp = interfaces[..., 1:] - interfaces[..., :-1]
+    has_mass = prev > MASSLESS
+    deepest = has_mass & (torch.cumsum(has_mass.flip(-1).int(), -1).flip(-1) == 1)  # last layer with mass
+    dp = dp + deepest * (total - interfaces[..., -1:])
     out = state.clone()
     out[..., th] = (dp - mean[th]) / std[th]
     return out
