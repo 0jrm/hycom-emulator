@@ -25,8 +25,6 @@ from pathlib import Path
 
 import numpy as np
 
-from gom_da.eval.hycom_archive import Grid, read_rec
-
 BAND_EFOLD_DAYS = 10.0
 DIFF_STD_FLOOR = 0.05
 LAYER_STATE = ("temp", "salin", "thknss", "u", "v")
@@ -57,6 +55,8 @@ def _to_grid_index(a):
 
 
 def band_mask(rmu_a: Path, ny: int, nx: int, sl) -> np.ndarray:
+    from gom_da.eval.hycom_archive import Grid, read_rec  # RCC only; stack_b00 runs on skynet
+
     grid = Grid(nx, ny, 1, np.empty(0), np.empty(0))
     rmu = read_rec(rmu_a, 0, grid)
     rmu = np.where(np.abs(rmu) < 1e29, rmu, 0.0)
@@ -119,9 +119,8 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
     f32 = {"dtype": "float32"}
     template.to_zarr(out, mode="w", compute=False, consolidated=False, encoding={"state": f32, "forcing": f32})
 
-    acc = {k: _Moments() for k in ("state", "diff", "forcing")}
+    stats = TrainStats()
     incs = [_stack(src.isel(cycle=c), LAYER_FORCING, (), "inc_", sl) for c in (0, 1)]
-    prev = None
     for n in range(t.size):
         row = src.isel(cycle=n + 2)
         st = np.nan_to_num(_to_grid_index(_stack(row, LAYER_STATE, SURFACE_STATE, "s00_", sl))).astype(np.float32)
@@ -134,28 +133,10 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
             {"state": (("time", g, "state_feature"), st[None]), "forcing": (("time", g, "forcing_feature"), fo[None])}
         ).to_zarr(out, region={"time": slice(n, n + 1)}, consolidated=False)
         if t[n] <= train_end:
-            acc["state"].add(st[ocean_gi])
-            acc["forcing"].add(fo[ocean_gi])
-            if prev is not None:
-                acc["diff"].add(st[ocean_gi] - prev)
-            prev = st[ocean_gi]
+            stats.add(st[ocean_gi], fo[ocean_gi])
         else:
-            prev = None
-
-    s_ocean = static[ocean_gi]
-    stats = xr.Dataset(
-        {
-            "state_mean": (("state_feature",), acc["state"].mean),
-            "state_std": (("state_feature",), acc["state"].std),
-            "state_diff_mean": (("state_feature",), acc["diff"].mean),
-            "state_diff_std": (("state_feature",), np.maximum(acc["diff"].std, DIFF_STD_FLOOR * acc["state"].std)),
-            "forcing_mean": (("forcing_feature",), acc["forcing"].mean),
-            "forcing_std": (("forcing_feature",), acc["forcing"].std),
-            "static_mean": (("static_feature",), s_ocean.mean(axis=0)),
-            "static_std": (("static_feature",), _safe(s_ocean.std(axis=0))),
-        }
-    )
-    stats.to_zarr(out, mode="a", consolidated=True)
+            stats.new_run()
+    stats.dataset(static[ocean_gi]).to_zarr(out, mode="a", consolidated=True)
 
 
 def _forcing_unit(name: str) -> str:
@@ -173,6 +154,47 @@ def _atm_24h(atm_ds, names, t, sl) -> np.ndarray:
 
 def _safe(s):
     return np.where(s > 0, s, 1.0).astype(np.float32)
+
+
+class TrainStats:
+    """The statistics a B00 zarr stores, over the ocean points of train rows given in time order.
+    Changes count only between consecutive rows of one run: call new_run() at a gap or a new run."""
+
+    def __init__(self):
+        self.acc = {k: _Moments() for k in ("state", "diff", "forcing")}
+        self.prev = None
+
+    def new_run(self):
+        self.prev = None
+
+    def add(self, state: np.ndarray, forcing: np.ndarray) -> None:
+        """One row: state (points, state_feature) and forcing (points, forcing_feature)."""
+        self.acc["state"].add(state)
+        self.acc["forcing"].add(forcing)
+        if self.prev is not None:
+            self.acc["diff"].add(state - self.prev)
+        self.prev = state
+
+    def dataset(self, static: np.ndarray):
+        """The statistics as a Dataset; static is (ocean points, static_feature)."""
+        import xarray as xr
+
+        a = self.acc
+        # Floor the raw stds, before _safe's placeholder 1: a channel that never changes gets the floor,
+        # one that is constant everywhere keeps 1 for both.
+        raw = {k: np.sqrt(m.m2 / m.n).astype(np.float32) for k, m in a.items()}
+        return xr.Dataset(
+            {
+                "state_mean": (("state_feature",), a["state"].mean),
+                "state_std": (("state_feature",), a["state"].std),
+                "state_diff_mean": (("state_feature",), a["diff"].mean),
+                "state_diff_std": (("state_feature",), _safe(np.maximum(raw["diff"], DIFF_STD_FLOOR * raw["state"]))),
+                "forcing_mean": (("forcing_feature",), a["forcing"].mean),
+                "forcing_std": (("forcing_feature",), a["forcing"].std),
+                "static_mean": (("static_feature",), static.mean(axis=0)),
+                "static_std": (("static_feature",), _safe(static.std(axis=0))),
+            }
+        )
 
 
 class _Moments:

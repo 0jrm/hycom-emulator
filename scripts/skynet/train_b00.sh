@@ -1,7 +1,7 @@
 #!/bin/bash
 # Train and score B00 on skynet. usage: train_b00.sh <run_id> <out_dir>
-# Stages the B00 data (a pack_b00 folder; a zarr also works) into /dev/shm and removes it on
-# exit. Each stage has a hard time cap,
+# Stages the B00 data (a pack_b00 or stack_b00 folder; a zarr also works) into /dev/shm and
+# removes it on exit. Each stage has a hard time cap,
 # so the whole run stays under the card's GPU-hour budget: graph 30 min, stage 1 (1-step) 7 h,
 # stage 2 (2-step) 3.5 h, evaluation 30 min. Stage 2 resumes stage 1's best val checkpoint
 # (neural-lam --load restores epoch, optimizer and the best val score), so it runs EPOCHS2 more
@@ -58,10 +58,11 @@ done
 $PY - "$OUT/scores_test.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
-print("verdict:", "PASS" if r["verdict"]["pass"] else "FAIL")
-for k, ok in r["verdict"]["rows"].items():
-    field, lead = k.split()
-    s = r["scores"][field][lead]
-    print(f"{k:12s} model {s['rmse_model']:.4g} persistence {s['rmse_persistence']:.4g} persistence+inc {s['rmse_persistence_inc']:.4g} corr_change {s['corr_change']:.3f} {'ok' if ok else 'FAIL'}")
+for member, m in r.get("members", {"": r}).items():
+    print(f"verdict {member}:", "PASS" if m["verdict"]["pass"] else "FAIL")
+    for k, ok in m["verdict"]["rows"].items():
+        field, lead = k.split()
+        s = m["scores"][field][lead]
+        print(f"{k:12s} model {s['rmse_model']:.4g} persistence {s['rmse_persistence']:.4g} persistence+inc {s['rmse_persistence_inc']:.4g} corr_change {s['corr_change']:.3f} {'ok' if ok else 'FAIL'}")
 PY
 echo "== $(date -Is) done"
