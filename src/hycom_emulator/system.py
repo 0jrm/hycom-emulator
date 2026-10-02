@@ -37,22 +37,25 @@ class SystemConfig:
     expt_dir: Path
     hycom_exe: Path
     blkdat: Path
-    nlist: Path
+    nlist: Path | None
     initial_restart: Path
     runtime_log: Path | None
     relax_rmu: Path
-    tsis_bin_dir: Path
+    tsis_bin_dir: Path | None
     tsis_bins: tuple[str, ...]
     forcing: str
-    obs_dir: Path
+    obs_dir: Path | None
     first_cycle: date
     last_cycle: date
     products: dict[str, str]
+    forcing_files: dict[str, str]
+    assimilation: bool = True  # false for a free run: no TSIS namelist, binaries, obs or increments
 
     @classmethod
     def from_toml(cls, path: Path) -> SystemConfig:
         raw = tomllib.loads(Path(path).read_text())
         expt = Path(raw["expt_dir"])
+        da = raw.get("assimilation", True)
         return cls(
             name=raw["name"],
             canonical=raw["canonical"],
@@ -60,17 +63,19 @@ class SystemConfig:
             expt_dir=expt,
             hycom_exe=expt / raw["hycom_exe"],
             blkdat=expt / raw["blkdat"],
-            nlist=expt / raw["nlist"],
+            nlist=expt / raw["nlist"] if da else None,
             initial_restart=expt / raw["initial_restart"],
             runtime_log=expt / raw["runtime_log"] if "runtime_log" in raw else None,
             relax_rmu=expt / raw["relax_rmu"],
-            tsis_bin_dir=Path(raw["tsis_bin_dir"]),
-            tsis_bins=tuple(raw["tsis_bins"]),
+            tsis_bin_dir=Path(raw["tsis_bin_dir"]) if da else None,
+            tsis_bins=tuple(raw["tsis_bins"]) if da else (),
             forcing=raw["forcing"],
-            obs_dir=Path(raw["obs_dir"]),
+            obs_dir=Path(raw["obs_dir"]) if da else None,
             first_cycle=raw["first_cycle"],
             last_cycle=raw["last_cycle"],
             products=dict(raw["products"]),
+            forcing_files=dict(raw.get("forcing_files", {})),
+            assimilation=da,
         )
 
     def product_glob(self, product: str) -> str:
@@ -116,10 +121,13 @@ def fingerprint(cfg: SystemConfig) -> Fingerprint:
     structural = {
         f"blkdat.{k}": f"{v:g}" for k, v in blk.items() if k not in NUMERICAL_KEYS | LABEL_KEYS
     }
-    for key, value in parse_nlist(cfg.nlist.read_text()).items():
-        if not key.endswith("_location") or key in NLIST_CONFIG_LOCATIONS:
-            structural[f"nlist.{key}"] = value
-    structural["tsis.build"] = cfg.tsis_bin_dir.name
+    if cfg.assimilation:
+        for key, value in parse_nlist(cfg.nlist.read_text()).items():
+            if not key.endswith("_location") or key in NLIST_CONFIG_LOCATIONS:
+                structural[f"nlist.{key}"] = value
+        structural["tsis.build"] = cfg.tsis_bin_dir.name
+    else:
+        structural["assimilation"] = "off"
     structural["forcing"] = cfg.forcing
     structural["relax_rmu"] = sha256_file(cfg.relax_rmu)
 

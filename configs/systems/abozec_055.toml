@@ -1,0 +1,40 @@
+# Cycled twin for E2 (boundary-only relax, hycom build cd03b7). abozec READ_ME: "twin of 04.7 with Cooper-Haines instead of StatsdpTS for projection"
+# Paths below are relative to expt_dir unless absolute. Read only: never write under abozec/.
+name = "abozec_055"
+canonical = false
+note = "Starts 2025-04-01 18Z from datasets/restart/restart_125d. relax.rmu = nest_rmu. hproject=0. TSIS build from rtf/defs.py BIN. June may have run blkdat.input_125f (unchecked)."
+
+expt_dir = "/gpfs/research/coaps/abozec/HYCOM2.3-TSIS/GOMb0.04/expt_05.5"
+hycom_exe = "data/hycom"
+blkdat = "blkdat.input_tsis_225s_24h_v8-29-2025"
+nlist = "rtf/tsis.nlist"
+initial_restart = "../datasets/restart/restart_125d.a"
+runtime_log = "data/hindcast_mean.log"
+relax_rmu = "data/relax.rmu.a"
+
+tsis_bin_dir = "/gpfs/research/coaps/abozec/HYCOM2.3-TSIS/TSISv2.0/src_gmrf/ugos-tsis_202509_noprofile"
+tsis_bins = ["xprep", "xgmrf", "xa2inc"]
+forcing = "cfsv2_gom"
+obs_dir = "/gpfs/research/coaps/abozec/HYCOM2.3-TSIS/GOMb0.04/datasets/data_gomb4/qcobs_profile_remap_055"
+
+first_cycle = 2025-04-02
+last_cycle = 2025-09-01
+
+[products]
+restart = "data/restart_125?.a"
+incupd = "data/incup/incupd.2025_*_18.a"
+inc_nc = "data/inc.2025_*_18.nc"
+archv = "data/tarv_*/055_archv.2025_*.a"
+archm = "data/tarm_*/055_archm.2025_*.a"
+tsis_obs = "{obs_dir}/tsis_obs_gomb4_*.nc"
+tsis_inov = "{obs_dir}/tsis_inov_gomb4_*.nc"
+
+[forcing_files]
+wndewd = "data/wvel/wndewd_125?.a"
+wndnwd = "data/wvel/wndnwd_125?.a"
+airtmp = "data/flux/airtmp_125?.a"
+vapmix = "data/flux/vapmix_125?.a"
+precip = "data/pcip/precip_125?.a"
+dswflx = "data/grad/glbrad_125?.a"
+dlwflx = "data/lrad/lwdflx_125?.a"
+mslprs = "data/mslp/mslprs_125?.a"
