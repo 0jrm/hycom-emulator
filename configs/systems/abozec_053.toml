@@ -1,0 +1,33 @@
+# Free run twin of 05.4: same build, nest and CFSv2 forcing, no assimilation, boundary-only relax.
+# abozec READ_ME: "freerun from April 1st to August 31st to test drift at depth without assimilation".
+# Paths below are relative to expt_dir unless absolute. Read only: never write under abozec/.
+name = "abozec_053"
+canonical = false
+note = "Free run from restart_125d (2025-04-01). relax.rmu = nest_rmu (boundary band only). sub_freerun.csh copies blkdat.input_v8-29-2025 (225 s)."
+assimilation = false
+
+expt_dir = "/gpfs/research/coaps/abozec/HYCOM2.3-TSIS/GOMb0.04/expt_05.3"
+hycom_exe = "data/hycom"
+blkdat = "blkdat.input_v8-29-2025"
+initial_restart = "data/restart_125d.a"
+runtime_log = "053free_125d.log"
+relax_rmu = "data/relax.rmu.a"
+forcing = "cfsv2_gom"
+
+# Cycle d (18Z) keys the 00Z archv of day d, as for cycled systems; the first archv is 04-02 00Z.
+first_cycle = 2025-04-02
+last_cycle = 2025-09-01
+
+[products]
+restart = "data/restart_125?.a"
+archv = "data/tarv_*/053_archv.2025_*.a"
+
+[forcing_files]
+wndewd = "data/wvel/wndewd_125?.a"
+wndnwd = "data/wvel/wndnwd_125?.a"
+airtmp = "data/flux/airtmp_125?.a"
+vapmix = "data/flux/vapmix_125?.a"
+precip = "data/pcip/precip_125?.a"
+dswflx = "data/grad/glbrad_125?.a"
+dlwflx = "data/lrad/lwdflx_125?.a"
+mslprs = "data/mslp/mslprs_125?.a"

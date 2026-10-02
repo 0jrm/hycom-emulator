@@ -7,6 +7,8 @@ Root dataset, dims (cycle, layer, y, x), land is NaN, float32:
   s00_*    archv snapshot at t_a-18h (00Z): temp salin thknss u v srfhgt montg1 ubaro vbaro oneta
   l3sst l3sst_err l3ssh l3ssh_err   gridded obs from tsis_obs
 Group obs/<YYYYMMDDHH of t_a>: one row per valid layer obs (tsis.LayerObs fields).
+A free run (assimilation = false) stores only static, s00_* and inc_* = 0 over ocean, so its rows
+line up with a cycled run's for prepare_b00.
 
 Rerunning skips cycles already in the store, so an interrupted build resumes where it stopped.
 Run `python -m hycom_emulator.build_store <system.toml> <out.zarr> [first last]` (dates YYYY-MM-DD).
@@ -30,6 +32,7 @@ from hycom_emulator.tsis import FILL_ABS, read_layer_obs
 
 LAND = 1e29  # HYCOM spval is 2**100
 ROLES_NEEDED = ("archm_21", "archm_09", "archv_00", "inc_nc", "tsis_obs")
+ROLES_NEEDED_FREE = ("archv_00",)
 S00_LAYER = {"temp": "temp", "salin": "salin", "thknss": "thknss", "u": "u-vel.", "v": "v-vel."}
 S00_SURFACE = {"srfhgt": "srfhgt", "montg1": "montg1", "ubaro": "u_btrop", "vbaro": "v_btrop", "oneta": "oneta"}
 INC = {"temp": "tem", "salin": "sal", "thknss": "thk", "ssh": "ssh"}
@@ -64,21 +67,26 @@ def statics(cfg: SystemConfig, grid: Grid):
     )
 
 
-def cycle_dataset(cycle: Cycle, grid: Grid):
+def cycle_dataset(cycle: Cycle, grid: Grid, assimilation: bool = True):
     import netCDF4
     import xarray as xr
 
-    xb = cycle_background(cycle, grid)
-    v: dict[str, tuple] = {
-        **{f"xb_{n}": (L4, _f32(x)) for n, x in xb.layer.items()},
-        "xb_thknss": (L4, _f32(xb.thknss)),
-        "xb_oneta": (L3, _f32(xb.oneta)),
-        **{f"xb_{n}": (L3, _f32(x)) for n, x in xb.surface.items()},
-    }
+    v: dict[str, tuple] = {}
     a = cycle.files["archv_00"]
     idx = parse_archv_index(a.with_suffix(".b"))
     v.update({f"s00_{n}": (L4, _f32(load_3d(a, idx, f, grid))) for n, f in S00_LAYER.items()})
     v.update({f"s00_{n}": (L3, _f32(load_2d(a, idx, f, grid))) for n, f in S00_SURFACE.items()})
+    if not assimilation:
+        wet = np.where(np.isfinite(v["s00_temp"][1]), 0.0, np.nan).astype(np.float32)
+        v.update({f"inc_{n}": (L4, wet) for n in ("temp", "salin", "thknss")})
+        v["inc_ssh"] = (L3, wet[0])
+        out = xr.Dataset({n: (("cycle", *dims), x[None]) for n, (dims, x) in v.items()})
+        return out.assign_coords(cycle=[np.datetime64(cycle.analysis, "ns")])
+    xb = cycle_background(cycle, grid)
+    v.update({f"xb_{n}": (L4, _f32(x)) for n, x in xb.layer.items()})
+    v["xb_thknss"] = (L4, _f32(xb.thknss))
+    v["xb_oneta"] = (L3, _f32(xb.oneta))
+    v.update({f"xb_{n}": (L3, _f32(x)) for n, x in xb.surface.items()})
     with netCDF4.Dataset(cycle.files["inc_nc"]) as ds:
         ds.set_auto_mask(False)
         for n, f in INC.items():
@@ -130,12 +138,12 @@ def build(cfg: SystemConfig, out: Path, first: date | None = None, last: date | 
         if np.datetime64(cycle.analysis, "ns") in done:
             log.append(f"{stamp} already written")
             continue
-        missing = cycle.missing(ROLES_NEEDED)
+        missing = cycle.missing(ROLES_NEEDED if cfg.assimilation else ROLES_NEEDED_FREE)
         if missing:
             log.append(f"{stamp} SKIP missing {missing}")
             continue
         t0 = time.time()
-        ds = cycle_dataset(cycle, grid)
+        ds = cycle_dataset(cycle, grid, cfg.assimilation)
         if not done:
             # mode="w" clears the whole store, so the root goes first and obs groups after it.
             ds = ds.merge(statics(cfg, grid))
@@ -144,7 +152,8 @@ def build(cfg: SystemConfig, out: Path, first: date | None = None, last: date | 
         else:
             ds.attrs.update(attrs)
             ds.to_zarr(out, append_dim="cycle", consolidated=False)
-        obs_dataset(cycle).to_zarr(out, group=f"obs/{stamp}", mode="w", consolidated=False)
+        if cfg.assimilation:
+            obs_dataset(cycle).to_zarr(out, group=f"obs/{stamp}", mode="w", consolidated=False)
         done.add(ds["cycle"].values[0])
         log.append(f"{stamp} wrote in {time.time() - t0:.1f}s")
         print(log[-1], flush=True)
