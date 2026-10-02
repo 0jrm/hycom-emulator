@@ -115,7 +115,9 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
         },
         attrs={**src.attrs, "stride": stride, "train_end": str(train_end), "iau_weights": str(IAU_WEIGHTS)},
     )
-    template.to_zarr(out, mode="w", compute=False, consolidated=False)
+    # Without an explicit dtype this xarray writes the float32 template as float64.
+    f32 = {"dtype": "float32"}
+    template.to_zarr(out, mode="w", compute=False, consolidated=False, encoding={"state": f32, "forcing": f32})
 
     acc = {k: _Moments() for k in ("state", "diff", "forcing")}
     incs = [_stack(src.isel(cycle=c), LAYER_FORCING, (), "inc_", sl) for c in (0, 1)]
@@ -126,7 +128,7 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
         fo = _to_grid_index(IAU_WEIGHTS[0] * incs[0] + IAU_WEIGHTS[1] * incs[1])
         if atm_ds is not None:
             fo = np.concatenate([fo, _to_grid_index(_atm_24h(atm_ds, atm_names, t[n], sl))], axis=1)
-        fo = np.nan_to_num(fo).astype(np.float32)  # region writes keep the array's dtype, not the template's
+        fo = np.nan_to_num(fo).astype(np.float32)
         incs = [incs[1], _stack(row, LAYER_FORCING, (), "inc_", sl)]
         xr.Dataset(
             {"state": (("time", g, "state_feature"), st[None]), "forcing": (("time", g, "forcing_feature"), fo[None])}
