@@ -159,11 +159,12 @@ def _score(ds, data, module, split, ar_steps, indices, member) -> dict:
 
 
 def verdict(scores: dict, partner_min: float = 0.0) -> dict:
-    """Card emu-b00-054-v1 rule: model RMSE below persistence for every field and lead, and corr_change > partner_min."""
+    """Model RMSE below persistence + increments for every field and lead, and corr_change > partner_min.
+    For a free run (zero increments) and for SSH, u and v this is plain persistence, card emu-b00-053's rule."""
     rows = {}
     for field, by_lead in scores.items():
         for lead, s in by_lead.items():
-            ok = s.get("rmse_model", np.inf) < s["rmse_persistence"] and s.get("corr_change", -1.0) > partner_min
+            ok = s.get("rmse_model", np.inf) < s["rmse_persistence_inc"] and s.get("corr_change", -1.0) > partner_min
             rows[f"{field} {lead}"] = bool(ok)
     return {"pass": all(rows.values()), "rows": rows}
 
