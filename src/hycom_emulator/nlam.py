@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 
 import hycom_emulator.datastore  # noqa: F401  registers DATASTORES["hycom"]
+import hycom_emulator.physics  # noqa: F401  registers hycom_graph_lam and hycom_wmse
 
 
 def _load_own_checkpoints() -> None:
