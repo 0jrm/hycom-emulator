@@ -11,6 +11,9 @@ Output zarr: state (time, grid_index, state_feature), forcing (time, grid_index,
 static (grid_index, static_feature), boundary_mask (grid_index): 1 on land and in the nest band
 (relax e-folding < BAND_EFOLD_DAYS). Land values are 0; neural-lam excludes boundary points from
 the loss and overwrites them with these values. Statistics cover ocean points of the train split.
+neural-lam weights each channel's loss by 1/(state_diff_std/state_std)^2. The near-fixed top
+thickness layers barely change, so their diff std is floored at DIFF_STD_FLOOR x state_std, the
+smallest ratio any T, S, u, v or SSH channel has; otherwise they swamp the loss.
 
 Run `python -m hycom_emulator.prepare_b00 <store.zarr> <out.zarr> <relax.rmu.a> --train-end YYYY-MM-DD [--stride N]`.
 """
@@ -25,6 +28,7 @@ import numpy as np
 from gom_da.eval.hycom_archive import Grid, read_rec
 
 BAND_EFOLD_DAYS = 10.0
+DIFF_STD_FLOOR = 0.05
 LAYER_STATE = ("temp", "salin", "thknss", "u", "v")
 SURFACE_STATE = ("srfhgt", "montg1", "ubaro", "vbaro")
 LAYER_FORCING = ("temp", "salin", "thknss")
@@ -142,7 +146,7 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
             "state_mean": (("state_feature",), acc["state"].mean),
             "state_std": (("state_feature",), acc["state"].std),
             "state_diff_mean": (("state_feature",), acc["diff"].mean),
-            "state_diff_std": (("state_feature",), acc["diff"].std),
+            "state_diff_std": (("state_feature",), np.maximum(acc["diff"].std, DIFF_STD_FLOOR * acc["state"].std)),
             "forcing_mean": (("forcing_feature",), acc["forcing"].mean),
             "forcing_std": (("forcing_feature",), acc["forcing"].std),
             "static_mean": (("static_feature",), s_ocean.mean(axis=0)),
@@ -170,25 +174,30 @@ def _safe(s):
 
 
 class _Moments:
-    """Running per-feature mean and std over rows of (points, feature) arrays."""
+    """Running per-feature mean and std over rows of (points, feature) arrays.
+    Merges per-batch mean and squared deviations (Chan et al.), so a constant feature gets std 0
+    instead of the cancellation residue of E[x^2] - m^2."""
 
     def __init__(self):
-        self.n, self.s, self.ss = 0, 0.0, 0.0
+        self.n, self.m, self.m2 = 0, 0.0, 0.0
 
     def add(self, a):
         a = a.astype(np.float64)
-        self.n += a.shape[0]
-        self.s = self.s + a.sum(axis=0)
-        self.ss = self.ss + (a * a).sum(axis=0)
+        nb = a.shape[0]
+        mb = a.mean(axis=0)
+        n = self.n + nb
+        delta = mb - self.m
+        self.m2 = self.m2 + ((a - mb) ** 2).sum(axis=0) + delta**2 * self.n * nb / n
+        self.m = self.m + delta * nb / n
+        self.n = n
 
     @property
     def mean(self):
-        return (self.s / self.n).astype(np.float32)
+        return np.asarray(self.m, dtype=np.float32)
 
     @property
     def std(self):
-        m = self.s / self.n
-        return _safe(np.sqrt(np.maximum(self.ss / self.n - m * m, 0.0)))
+        return _safe(np.sqrt(self.m2 / self.n))
 
 
 def main() -> None:

@@ -61,3 +61,12 @@ def test_forcing_is_the_iau_share_of_two_increments(stores):
         i = int(np.argmin(np.abs(s["plon"].values[0, :] - x)))
         inc = s["inc_temp"].sel(cycle=[np.datetime64(datetime(2025, 6, d, 18)) for d in (3, 4)]).values[:, 0, j, i]
     assert float(f.sel(forcing_feature="inc_temp_k01").isel(grid_index=gi)) == pytest.approx(0.75 * inc[0] + 0.25 * inc[1], abs=1e-6)
+
+
+def test_no_channel_dominates_the_loss(stores):
+    from hycom_emulator.datastore import HycomDatastore
+    from hycom_emulator.prepare_b00 import DIFF_STD_FLOOR
+
+    _, cfg = stores
+    r = HycomDatastore(cfg).get_standardization_dataarray("state").state_diff_std_standardized.values
+    assert np.isfinite(r).all() and r.min() >= DIFF_STD_FLOOR * (1 - 1e-6)
