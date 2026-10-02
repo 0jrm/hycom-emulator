@@ -64,6 +64,21 @@ def test_projection_keeps_columns_positive_and_closed():
     assert torch.isfinite(delta.grad).all()
 
 
+def test_projection_leaves_upper_layers_alone_when_the_column_has_room():
+    stub = _Stub()
+    mean, std = (torch.tensor(stub.stats[v].values) for v in ("state_mean", "state_std"))
+    prev = _state(np.random.default_rng(5))
+    prev[..., TH] = np.array([1.0, 10.0, 89.0]) * ONEM  # column of 100 m
+    new = prev.copy()
+    new[..., TH] = np.array([1.0, 12.0, 80.0]) * ONEM  # 7 m short: the bottom layer absorbs it
+    out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH))
+    dp = (out[..., TH] * std[TH] + mean[TH]).numpy() / ONEM
+    np.testing.assert_allclose(dp[0, 0], [1.0, 12.0, 87.0], rtol=1e-5)
+    new[..., TH] = np.array([1.0, 12.0, 95.0]) * ONEM  # 8 m too deep: the bottom layer gives it back
+    out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH))
+    np.testing.assert_allclose((out[..., TH] * std[TH] + mean[TH]).numpy()[0, 0] / ONEM, [1.0, 12.0, 87.0], rtol=1e-5)
+
+
 def test_plain_settings_reduce_to_wmse():
     rng = np.random.default_rng(1)
     stub = _Stub()
