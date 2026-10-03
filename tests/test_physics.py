@@ -173,6 +173,9 @@ def test_arm_configs_load_in_neural_lam(tmp_path):
         if arm == "control":
             assert args == ["--model", "graph_lam", "--loss", "wmse"] and "physics" not in ds.config
         else:
-            assert args == ["--model", "hycom_graph_lam", "--loss", "hycom_wmse"]
+            from hycom_emulator.physics import CONTEXT
+
+            assert args == ["--model", "graph_lam", "--loss", "hycom_wmse"]
+            assert CONTEXT.settings["thickness_weighted"]  # the datastore configured hycom_wmse
             assert sum(cfg.training.state_feature_weighting.weights.values()) == pytest.approx(1.0)
             assert (ds.config["physics"]["density"] > 0) == (arm == "penalties")

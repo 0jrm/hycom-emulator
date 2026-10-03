@@ -40,6 +40,10 @@ class HycomDatastore(BaseRegularGridDatastore):
         self._config = yaml.safe_load(self._config_path.read_text())
         self._ds = _open(Path(self._config["zarr"]))
         self.is_ensemble = self.has_ensemble_forcing = "ensemble_member" in self._ds["state"].dims
+        if "physics" in self._config:  # hycom_wmse reads its settings from here
+            from hycom_emulator.physics import CONTEXT
+
+            CONTEXT.configure(self)
         for split in ("train", "val", "test"):
             if split not in self._config["splits"]:
                 raise ValueError(f"{config_path}: missing split {split}")

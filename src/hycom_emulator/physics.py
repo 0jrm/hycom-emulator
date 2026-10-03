@@ -8,7 +8,11 @@ in the 05.3 archives). B00 trained with neural-lam's channel-wise wmse breaks bo
   a shortfall is spread over layers with mass by their 24 h change variance (the least-squares
   correction under wmse); exact, differentiable.
   `hycom_graph_lam` is GraphLAM with this projection after neural-lam's residual update; it has
-  GraphLAM's weights, so it loads GraphLAM checkpoints.
+  GraphLAM's weights, so it loads GraphLAM checkpoints. Use it at prediction time only
+  (evaluate_b00 --model hycom_graph_lam): on E1 it costs no skill and removes the negative
+  thicknesses and column errors, while training through it diverged (emu-b00-053-phys and the
+  explore-phys2-gate run, 2026-10-02/03): closing a column makes one layer absorb the summed error
+  of the others, and on the shelf every layer has a tiny change std, so wmse's gradients explode.
 - hycom_wmse: neural-lam's wmse with T, S, u and v layer entries weighted by the true layer thickness
   relative to the column mean (empty layers weigh 0, as in evaluate_b00), plus optional penalties on
   sigma2 error (couples T and S, holds isopycnal layers at their density) and on static instability
@@ -16,7 +20,7 @@ in the 05.3 archives). B00 trained with neural-lam's channel-wise wmse breaks bo
 - group_weights: each layered field (41 channels) and each surface field gets the same total weight,
   so SSH is 1/9 of the loss instead of 1/209.
 
-ARMS names the ablation arms of cards emu-b00-053-phys and emu-b00-053-phys2. `python -m hycom_emulator.physics arm <arm> <b00.yaml>
+ARMS names the arms of card emu-b00-053-phys2 (all trained with GraphLAM, scored with the projection). `python -m hycom_emulator.physics arm <arm> <b00.yaml>
 <nlam.yaml>` adds the arm's settings to both files and prints the train_model arguments it needs.
 Importing this module registers `hycom_graph_lam` and `hycom_wmse` with neural-lam.
 """
@@ -32,6 +36,7 @@ from neural_lam.models import MODELS
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 
 ONEM = 9806.0  # Pa of layer thickness per metre
+DENSITY_WEIGHT, STABILITY_WEIGHT = 4.07e-4, 3.91e-2  # set from preflight3 below
 MASSLESS = 1e-3 * ONEM  # Pa: a layer thinner than 1 mm holds no mass
 RHO_REF = 0.01  # kg/m3: density error that costs as much as one standardized change
 LAYERED = ("temp", "salin", "thknss", "u", "v")
@@ -41,16 +46,13 @@ SIGMA2_7T = (9.77093e00, -2.26493e-02, 7.89879e-01, -6.43205e-03, -2.62983e-03, 
 
 ARMS = {
     "control": {"model": "graph_lam", "loss": "wmse"},
-    "project": {"model": "hycom_graph_lam", "loss": "wmse"},
-    "reweight": {"model": "hycom_graph_lam", "loss": "hycom_wmse", "group_weights": True,
+    "reweight": {"model": "graph_lam", "loss": "hycom_wmse", "group_weights": True,
                  "physics": {"thickness_weighted": True, "density": 0.0, "stability": 0.0}},
     # Penalty weights: each penalty is 1/9 of the base loss (one variable group's share) at E1's
-    # checkpoint, over all 115 train samples with the clip-first projection (base 0.434, sigma2 term
-    # 118.7 and stability term 1.23 at weight 1; explore-physcheck/preflight2, 2026-10-03).
-    "penalties": {"model": "hycom_graph_lam", "loss": "hycom_wmse", "group_weights": True,
-                  "physics": {"thickness_weighted": True, "density": 4.07e-4, "stability": 3.91e-2}},
+    # checkpoint over all 115 train samples (explore-physcheck/preflight3, 2026-10-03).
+    "penalties": {"model": "graph_lam", "loss": "hycom_wmse", "group_weights": True,
+                  "physics": {"thickness_weighted": True, "density": DENSITY_WEIGHT, "stability": STABILITY_WEIGHT}},
 }
-
 
 def sigma2(t, s):
     c1, c2, c3, c4, c5, c6, c7 = SIGMA2_7T
@@ -104,7 +106,8 @@ class HycomGraphLAM(GraphLAM):
 
 class _Context:
     """What hycom_wmse needs beyond neural-lam's metric arguments: feature columns, statistics and
-    the physics settings of the datastore config. Set by HycomGraphLAM when the model is built."""
+    the physics settings of the datastore config. Set by HycomDatastore when its config has a
+    `physics` section, and by HycomGraphLAM."""
 
     def configure(self, datastore):
         names = datastore.get_vars_names("state")
