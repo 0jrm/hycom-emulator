@@ -77,9 +77,20 @@ def test_projection_spreads_the_shortfall_by_change_variance():
     share = np.array([1e-4, 1.0, 4.0]) / 5.0001  # the 7 m shortfall, spread by change variance
     np.testing.assert_allclose(dp[0, 0], [1.0, 12.0, 80.0] + 7 * share, rtol=1e-5)
     assert abs(dp[0, 0, 0] - 1.0) < 1e-3  # the near-fixed top layer barely moves
-    new[..., TH] = np.array([1.0, 12.0, 95.0]) * ONEM  # 8 m too deep
+    new[..., TH] = np.array([1.0, 12.0, 95.0]) * ONEM  # 8 m too deep: clipped from the bottom, upper layers kept
     out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH), VAR)
-    np.testing.assert_allclose((out[..., TH] * std[TH] + mean[TH]).numpy()[0, 0] / ONEM, [1.0, 12.0, 95.0] - 8 * share, rtol=1e-5)
+    np.testing.assert_allclose((out[..., TH] * std[TH] + mean[TH]).numpy()[0, 0] / ONEM, [1.0, 12.0, 87.0], rtol=1e-5)
+
+
+def test_spurious_mass_below_the_bottom_is_removed_first():
+    stub = _Stub()
+    mean, std = (torch.tensor(stub.stats[v].values) for v in ("state_mean", "state_std"))
+    prev = _state(np.random.default_rng(7))
+    prev[..., TH] = np.array([1.0, 9.0, 0.0]) * ONEM  # a 10 m shelf column, bottom layer empty
+    new = prev.copy()
+    new[..., TH] = np.array([1.0, 9.0, 1.7]) * ONEM  # network noise puts 1.7 m into the empty layer
+    out = project_thickness(_std(new, stub), _std(prev, stub), mean, std, torch.tensor(TH), VAR)
+    np.testing.assert_allclose((out[..., TH] * std[TH] + mean[TH]).numpy()[0, 0] / ONEM, [1.0, 9.0, 0.0], atol=1e-5)
 
 
 
@@ -162,6 +173,9 @@ def test_arm_configs_load_in_neural_lam(tmp_path):
         if arm == "control":
             assert args == ["--model", "graph_lam", "--loss", "wmse"] and "physics" not in ds.config
         else:
-            assert args == ["--model", "hycom_graph_lam", "--loss", "hycom_wmse"]
+            from hycom_emulator.physics import CONTEXT
+
+            assert args == ["--model", "graph_lam", "--loss", "hycom_wmse"]
+            assert CONTEXT.settings["thickness_weighted"]  # the datastore configured hycom_wmse
             assert sum(cfg.training.state_feature_weighting.weights.values()) == pytest.approx(1.0)
             assert (ds.config["physics"]["density"] > 0) == (arm == "penalties")

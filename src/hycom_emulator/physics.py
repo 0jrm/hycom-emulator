@@ -4,11 +4,15 @@ HYCOM's layer thicknesses are never negative and each column sums to the bottom 
 in the 05.3 archives). B00 trained with neural-lam's channel-wise wmse breaks both (explore-physcheck,
 2026-10-02): 11% of (point, layer) thicknesses below -1 cm, column sums off by 0.4 m RMS.
 
-- project_thickness: relu on every layer thickness, then each column closed at the column sum of the
-  previous state, the shortfall spread over layers with mass by their 24 h change variance (the
-  least-squares correction under wmse; exact, differentiable).
+- project_thickness: relu on every layer thickness; a column's excess is clipped from the bottom, and
+  a shortfall is spread over layers with mass by their 24 h change variance (the least-squares
+  correction under wmse); exact, differentiable.
   `hycom_graph_lam` is GraphLAM with this projection after neural-lam's residual update; it has
-  GraphLAM's weights, so it loads GraphLAM checkpoints.
+  GraphLAM's weights, so it loads GraphLAM checkpoints. Use it at prediction time only
+  (evaluate_b00 --model hycom_graph_lam): on E1 it costs no skill and removes the negative
+  thicknesses and column errors, while training through it diverged (emu-b00-053-phys and the
+  explore-phys2-gate run, 2026-10-02/03): closing a column makes one layer absorb the summed error
+  of the others, and on the shelf every layer has a tiny change std, so wmse's gradients explode.
 - hycom_wmse: neural-lam's wmse with T, S, u and v layer entries weighted by the true layer thickness
   relative to the column mean (empty layers weigh 0, as in evaluate_b00), plus optional penalties on
   sigma2 error (couples T and S, holds isopycnal layers at their density) and on static instability
@@ -16,7 +20,7 @@ in the 05.3 archives). B00 trained with neural-lam's channel-wise wmse breaks bo
 - group_weights: each layered field (41 channels) and each surface field gets the same total weight,
   so SSH is 1/9 of the loss instead of 1/209.
 
-ARMS names the ablation of card emu-b00-053-phys. `python -m hycom_emulator.physics arm <arm> <b00.yaml>
+ARMS names the arms of card emu-b00-053-phys2 (all trained with GraphLAM, scored with the projection). `python -m hycom_emulator.physics arm <arm> <b00.yaml>
 <nlam.yaml>` adds the arm's settings to both files and prints the train_model arguments it needs.
 Importing this module registers `hycom_graph_lam` and `hycom_wmse` with neural-lam.
 """
@@ -32,6 +36,7 @@ from neural_lam.models import MODELS
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 
 ONEM = 9806.0  # Pa of layer thickness per metre
+DENSITY_WEIGHT, STABILITY_WEIGHT = 4.00e-4, 3.90e-2  # 1/9 of base 0.427 each: sigma2 term 118.6, stability 1.22 at weight 1
 MASSLESS = 1e-3 * ONEM  # Pa: a layer thinner than 1 mm holds no mass
 RHO_REF = 0.01  # kg/m3: density error that costs as much as one standardized change
 LAYERED = ("temp", "salin", "thknss", "u", "v")
@@ -41,15 +46,13 @@ SIGMA2_7T = (9.77093e00, -2.26493e-02, 7.89879e-01, -6.43205e-03, -2.62983e-03, 
 
 ARMS = {
     "control": {"model": "graph_lam", "loss": "wmse"},
-    "project": {"model": "hycom_graph_lam", "loss": "wmse"},
-    "reweight": {"model": "hycom_graph_lam", "loss": "hycom_wmse", "group_weights": True,
+    "reweight": {"model": "graph_lam", "loss": "hycom_wmse", "group_weights": True,
                  "physics": {"thickness_weighted": True, "density": 0.0, "stability": 0.0}},
     # Penalty weights: each penalty is 1/9 of the base loss (one variable group's share) at E1's
-    # checkpoint, measured on 8 train samples (explore-physcheck/calibrate.log, 2026-10-02).
-    "penalties": {"model": "hycom_graph_lam", "loss": "hycom_wmse", "group_weights": True,
-                  "physics": {"thickness_weighted": True, "density": 5.72e-4, "stability": 7.89e-2}},
+    # checkpoint over all 115 train samples (explore-physcheck/preflight3, 2026-10-03).
+    "penalties": {"model": "graph_lam", "loss": "hycom_wmse", "group_weights": True,
+                  "physics": {"thickness_weighted": True, "density": DENSITY_WEIGHT, "stability": STABILITY_WEIGHT}},
 }
-
 
 def sigma2(t, s):
     c1, c2, c3, c4, c5, c6, c7 = SIGMA2_7T
@@ -63,21 +66,23 @@ def layer_columns(names: list[str], var: str) -> list[int]:
 def project_thickness(state, prev_state, mean, std, th, change_var):
     """state, prev_state: (..., grid, feature) standardized; change_var: (thickness layers,) variance of
     each layer's 24 h thickness change (Pa^2). Thickness columns th become >= 0 and each column sums to
-    prev_state's column sum. The shortfall is spread over the layers that hold mass in prev_state in
-    proportion to change_var: the least-squares correction under wmse's own metric, so the fixed
-    z-level layers at the top (tiny change variance) barely move and empty layers stay empty. Rounding
-    left by positivity is closed the way HYCOM closes a column: interfaces clipped at the bottom, the
-    remainder to the deepest layer with mass. Other features are untouched."""
+    prev_state's column sum, in two steps:
+    1. Excess: interfaces accumulated from the top are clipped at the column sum, as HYCOM closes a
+       column. This removes first the spurious mass the network scatters into layers that are empty
+       below the bottom (about +-1.7 m in E1), not mass from real layers.
+    2. Shortfall: what is still missing is spread over the layers that hold mass in prev_state in
+       proportion to change_var, the least-squares correction under wmse's own metric, so the fixed
+       z-level layers at the top (tiny change variance) barely move and empty layers stay empty.
+    Spreading a column's excess over its real layers instead (the first version) took it out of the
+    near-fixed shelf layers, whose tiny change std made the fine-tune diverge (emu-b00-053-phys,
+    2026-10-02). Other features are untouched."""
     dp = torch.relu(state[..., th] * std[th] + mean[th])
     prev = torch.relu(prev_state[..., th] * std[th] + mean[th])
     total = prev.sum(-1, keepdim=True)
-    has_mass = prev > MASSLESS
-    w = has_mass * change_var
-    dp = torch.relu(dp + (total - dp.sum(-1, keepdim=True)) * w / w.sum(-1, keepdim=True).clamp_min(1e-12))
     interfaces = torch.cat([torch.zeros_like(total), torch.minimum(torch.cumsum(dp, -1), total)], -1)
     dp = interfaces[..., 1:] - interfaces[..., :-1]
-    deepest = has_mass & (torch.cumsum(has_mass.flip(-1).int(), -1).flip(-1) == 1)  # last layer with mass
-    dp = dp + deepest * (total - interfaces[..., -1:])
+    w = (prev > MASSLESS) * change_var
+    dp = dp + (total - interfaces[..., -1:]) * w / w.sum(-1, keepdim=True).clamp_min(1e-12)
     out = state.clone()
     out[..., th] = (dp - mean[th]) / std[th]
     return out
@@ -101,7 +106,8 @@ class HycomGraphLAM(GraphLAM):
 
 class _Context:
     """What hycom_wmse needs beyond neural-lam's metric arguments: feature columns, statistics and
-    the physics settings of the datastore config. Set by HycomGraphLAM when the model is built."""
+    the physics settings of the datastore config. Set by HycomDatastore when its config has a
+    `physics` section, and by HycomGraphLAM."""
 
     def configure(self, datastore):
         names = datastore.get_vars_names("state")

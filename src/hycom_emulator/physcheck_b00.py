@@ -15,7 +15,7 @@ same checks run on the truth, the model and persistence + increments:
                    thknss k20 (> truth: grid-scale noise added; < truth: smoothed)
   ke               mean surface kinetic energy (m2/s2)
 
-Run `python -m hycom_emulator.physcheck_b00 <nlam.yaml> <ckpt> <out.json> [--split test]`.
+Run `python -m hycom_emulator.physcheck_b00 <nlam.yaml> <ckpt> <out.json> [--split test] [--model hycom_graph_lam]`.
 """
 
 from __future__ import annotations
@@ -66,8 +66,8 @@ def _laplacian(a):
     return a[:-2, 1:-1] + a[2:, 1:-1] + a[1:-1, :-2] + a[1:-1, 2:] - 4 * a[1:-1, 1:-1]
 
 
-def physcheck(config: Path, ckpt: Path, split: str = "test") -> dict:
-    ds, data, module = load(config, ckpt, split, ar_steps=2)
+def physcheck(config: Path, ckpt: Path, split: str = "test", model: str | None = None) -> dict:
+    ds, data, module = load(config, ckpt, split, ar_steps=2, model=model)
     names = ds.get_vars_names("state")
     interior = ~ds.boundary_mask.values.astype(bool)
     grid = Grid(ds)
@@ -82,7 +82,7 @@ def physcheck(config: Path, ckpt: Path, split: str = "test") -> dict:
             for who, x in zip(WHO, (c.true, c.model, c.pinc)):
                 r[who] = checks(names, grid, inner, interior, c.x0, x, c.true)
             rows.append(r)
-    return {"checkpoint": str(ckpt), "split": split, "summary": summarize(rows), "samples": rows}
+    return {"checkpoint": str(ckpt), "split": split, "model": model, "summary": summarize(rows), "samples": rows}
 
 
 def summarize(rows) -> dict:
@@ -103,8 +103,9 @@ def main() -> None:
     p.add_argument("ckpt", type=Path)
     p.add_argument("out", type=Path)
     p.add_argument("--split", default="test")
+    p.add_argument("--model", default=None, help="step predictor to load the weights into, e.g. hycom_graph_lam")
     a = p.parse_args()
-    res = physcheck(a.config, a.ckpt, a.split)
+    res = physcheck(a.config, a.ckpt, a.split, a.model)
     a.out.write_text(json.dumps(res, indent=1))
     keys = list(next(iter(res["summary"].values())))
     print("".ljust(13) + "".join(k[:12].rjust(13) for k in keys))

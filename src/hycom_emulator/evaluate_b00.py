@@ -91,8 +91,10 @@ class Accumulator:
         return out
 
 
-def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int):
-    """(datastore, WeatherDataset of the split, forecaster module or None)."""
+def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int, model: str | None = None):
+    """(datastore, WeatherDataset of the split, forecaster module or None). model, a neural-lam MODELS
+    name, loads the checkpoint's weights into that step predictor instead of the one it was trained
+    with: `hycom_graph_lam` applies the thickness projection to a GraphLAM checkpoint at prediction time."""
     import torch
     from neural_lam.config import load_config_and_datastore
     from neural_lam.weather_dataset import WeatherDataset
@@ -107,13 +109,22 @@ def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int):
         from neural_lam.train_model import load_forecaster_module_from_checkpoint
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        module = load_forecaster_module_from_checkpoint(str(ckpt), config, ds).to(device).eval()
+        if model is None:
+            module = load_forecaster_module_from_checkpoint(str(ckpt), config, ds)
+        else:
+            from neural_lam.models import MODELS, ARForecaster, ForecasterModule
+            from neural_lam.train_model import build_predictor
+
+            args = torch.load(ckpt, map_location="cpu", weights_only=False)["hyper_parameters"]["args"]
+            forecaster = ARForecaster(build_predictor(MODELS[model], args, config, ds), ds)
+            module = ForecasterModule.load_from_checkpoint(str(ckpt), forecaster=forecaster, datastore=ds, weights_only=False)
+        module = module.to(device).eval()
     return ds, data, module
 
 
-def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps: int = 2) -> dict:
-    ds, data, module = load(config_path, ckpt, split, ar_steps)
-    head = {"split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt) if ckpt else None}
+def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps: int = 2, model: str | None = None) -> dict:
+    ds, data, module = load(config_path, ckpt, split, ar_steps, model)
+    head = {"split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt) if ckpt else None, "model": model}
     if not ds.is_ensemble:
         return head | _score(ds, data, module, split, ar_steps, range(len(data)), None)
     members = ds.get_dataarray("state", split)["ensemble_member"].values.tolist()
@@ -200,9 +211,10 @@ def main() -> None:
     p.add_argument("out", type=Path)
     p.add_argument("--split", default="test")
     p.add_argument("--ar-steps", type=int, default=2)
+    p.add_argument("--model", default=None, help="step predictor to load the weights into, e.g. hycom_graph_lam")
     a = p.parse_args()
     ckpt = None if a.ckpt == "none" else Path(a.ckpt)
-    res = evaluate(a.config, ckpt, a.split, a.ar_steps)
+    res = evaluate(a.config, ckpt, a.split, a.ar_steps, a.model)
     a.out.write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 

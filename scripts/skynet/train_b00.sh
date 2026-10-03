@@ -14,6 +14,8 @@
 # INIT=<checkpoint> skips stage 1 and fine-tunes INIT as stage 2 (EPOCHS2 epochs, CAP2 time cap,
 # fresh optimizer); the scored checkpoint is then stage 2's own best, since its loss may differ
 # from INIT's. ARM=<arm of hycom_emulator.physics.ARMS> sets the model, loss and loss weights.
+# EVAL_MODEL=<neural-lam model> scores the checkpoint with that step predictor (hycom_graph_lam: the
+# thickness projection at prediction time).
 # EPOCHS1, EPOCHS2, CAP1, CAP2, DATA, PY and GPU override the defaults (used by the CPU smoke test).
 # Run detached: setsid nohup train_b00.sh <run_id> <out_dir> > <out_dir>/train.log 2>&1 &
 set -euo pipefail
@@ -78,9 +80,9 @@ fi
 echo "scored checkpoint: $S2"
 echo "== $(date -Is) evaluate"
 for split in val test; do
-  timeout 30m $PY -m hycom_emulator.evaluate_b00 nlam.yaml "$S2" "$OUT/scores_$split.json" --split $split --ar-steps 2 > /dev/null
+  timeout 30m $PY -m hycom_emulator.evaluate_b00 nlam.yaml "$S2" "$OUT/scores_$split.json" --split $split --ar-steps 2 ${EVAL_MODEL:+--model $EVAL_MODEL} > /dev/null
 done
-timeout 30m $PY -m hycom_emulator.physcheck_b00 nlam.yaml "$S2" "$OUT/physcheck_test.json" --split test
+timeout 30m $PY -m hycom_emulator.physcheck_b00 nlam.yaml "$S2" "$OUT/physcheck_test.json" --split test ${EVAL_MODEL:+--model $EVAL_MODEL}
 $PY - "$OUT/scores_test.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1]))
