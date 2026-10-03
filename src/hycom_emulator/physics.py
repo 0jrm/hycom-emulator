@@ -36,7 +36,7 @@ from neural_lam.models import MODELS
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 
 ONEM = 9806.0  # Pa of layer thickness per metre
-DENSITY_WEIGHT, STABILITY_WEIGHT = 4.07e-4, 3.91e-2  # set from preflight3 below
+DENSITY_WEIGHT, STABILITY_WEIGHT = 4.00e-4, 3.90e-2  # 1/9 of base 0.427 each: sigma2 term 118.6, stability 1.22 at weight 1
 MASSLESS = 1e-3 * ONEM  # Pa: a layer thinner than 1 mm holds no mass
 RHO_REF = 0.01  # kg/m3: density error that costs as much as one standardized change
 LAYERED = ("temp", "salin", "thknss", "u", "v")
