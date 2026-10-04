@@ -178,25 +178,38 @@ def _layers(names, var):
     return np.array(sorted((i for i, n in enumerate(names) if n.startswith(f"{var}_k")), key=lambda i: names[i]))
 
 
+class Section:
+    """A latitude or longitude section: column edges X and interface depths ze (m) from the target's
+    layer thicknesses, for pcolormesh(X.T, ze.T, values.T) with values (point, layer)."""
+
+    def __init__(self, grid, names, true, axis, value):
+        self.names, self.axis = names, axis
+        self.gi, coord, self.at = grid.section(axis, value)
+        self.blank = grid.blank[self.gi]
+        z = np.concatenate([np.zeros((self.gi.size, 1)), np.cumsum(true[self.gi][:, _layers(names, "thknss")] / ONEM, axis=1)], axis=1)
+        edges = np.concatenate([[coord[0] - (coord[1] - coord[0]) / 2], (coord[1:] + coord[:-1]) / 2, [coord[-1] + (coord[-1] - coord[-2]) / 2]])
+        self.ze = np.concatenate([z[:1], (z[1:] + z[:-1]) / 2, z[-1:]])  # interface depths at the column edges
+        self.X = np.broadcast_to(edges[:, None], self.ze.shape)
+
+    def values(self, x, var):
+        """(point, layer) of a layered field of state x; u, v include the barotropic part."""
+        a = x[self.gi][:, _layers(self.names, var)]
+        if var in ("u", "v"):
+            a = a + x[self.gi][:, [self.names.index(f"{var}baro")]]
+        return np.where(self.blank[:, None], np.nan, a)
+
+    def where(self):
+        return f"{self.at:.2f}N" if self.axis == "lat" else f"{self.at:.2f}E"
+
+
 def plot_section(grid, names, c, title, axis, value, depth, path):
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    gi, coord, at = grid.section(axis, value)
-    blank = grid.blank[gi]
-    col = {n: i for i, n in enumerate(names)}
-    z = np.concatenate([np.zeros((gi.size, 1)), np.cumsum(c.true[gi][:, _layers(names, "thknss")] / ONEM, axis=1)], axis=1)
-    edges = np.concatenate([[coord[0] - (coord[1] - coord[0]) / 2], (coord[1:] + coord[:-1]) / 2, [coord[-1] + (coord[-1] - coord[-2]) / 2]])
-    ze = np.concatenate([z[:1], (z[1:] + z[:-1]) / 2, z[-1:]])  # interface depths at the column edges
-    X = np.broadcast_to(edges[:, None], ze.shape)
-
-    def values(x, var):
-        a = x[gi][:, _layers(names, var)]
-        if var in ("u", "v"):
-            a = a + x[gi][:, [col[f"{var}baro"]]]
-        return np.where(blank[:, None], np.nan, a)
+    sec = Section(grid, names, c.true, axis, value)
+    X, ze, values = sec.X, sec.ze, sec.values
 
     fig, axes = plt.subplots(len(SECTION_FIELDS), 3, figsize=(18, 3.2 * len(SECTION_FIELDS)), constrained_layout=True)
     for r, (var, label) in enumerate(SECTION_FIELDS):
@@ -213,8 +226,7 @@ def plot_section(grid, names, c, title, axis, value, depth, path):
             ax.set_xlabel("longitude" if axis == "lat" else "latitude")
             ax.set_ylabel("depth (m)")
             fig.colorbar(im, ax=ax, shrink=0.8)
-    where = f"{at:.2f}N" if axis == "lat" else f"{at:.2f}E"
-    fig.suptitle(f"{title}; section at {where}")
+    fig.suptitle(f"{title}; section at {sec.where()}")
     fig.savefig(path, dpi=110)
     plt.close(fig)
 
