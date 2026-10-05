@@ -59,6 +59,9 @@ ARMS = {
     "conv_noca": REWEIGHT | {"model": "conv_graph_lam", "conv": {"blocks": 3, "channel_attention": False, "stride": 1}},
     "unet": REWEIGHT | {"model": "conv_graph_lam", "conv": {"blocks": 3, "channel_attention": True, "stride": 4},
                         "graph": "multiscale_s4"},
+    "unet_norm": REWEIGHT | {"model": "conv_graph_lam",
+                             "conv": {"blocks": 3, "channel_attention": True, "stride": 4, "norm": True},
+                             "graph": "multiscale_s4"},
 }
 
 def sigma2(t, s):

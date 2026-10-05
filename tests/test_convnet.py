@@ -18,7 +18,7 @@ def root(tmp_path_factory):
     root = tmp_path_factory.mktemp("conv")
     rng = np.random.default_rng(0)
     pack = write_pack(root / "pack", *_run(rng, False, rng.normal(size=(T, NX * NY, 1))), shape=(NX, NY))
-    for name, conv in (("a", ""), ("b", "conv:\n  stride: 4\n")):
+    for name, conv in (("a", ""), ("b", "conv:\n  stride: 4\n"), ("n", "conv:\n  norm: true\n")):
         (root / f"{name}.yaml").write_text(f"zarr: {pack}\n{SPLITS}{conv}")
         (root / f"nlam_{name}.yaml").write_text(f"datastore:\n  kind: hycom\n  config_path: {name}.yaml\n")
     main(["nlam", "create_graph", "--config_path", str(root / "nlam_a.yaml"), "--name", "multiscale"])
@@ -52,6 +52,18 @@ def test_option_a_starts_as_the_graph_lam_it_loads(root):
     conv.load_state_dict(parent.state_dict(), strict=True)
     x = inputs(ds)
     assert torch.allclose(conv(*x)[0], parent(*x)[0], atol=1e-5), "option A must reproduce GraphLAM at step 0"
+
+
+def test_pre_norm_blocks_also_start_as_graph_lam(root):
+    from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
+
+    ds = datastore(root, "n")
+    parent = build(GraphLAM, ds, seed=0)
+    conv = build(ConvGraphLAM, ds, seed=1)
+    conv.load_state_dict(parent.state_dict(), strict=True)
+    assert conv.encoder[0].norm is not None
+    x = inputs(ds)
+    assert torch.allclose(conv(*x)[0], parent(*x)[0], atol=1e-5), "pre-norm blocks must start as the identity"
 
 
 def test_a_partial_conv_state_dict_fails(root):
@@ -129,6 +141,7 @@ def test_projection_closes_conv_columns(root):
     ("conv", {"blocks": 3, "channel_attention": True, "stride": 1}, []),
     ("conv_noca", {"blocks": 3, "channel_attention": False, "stride": 1}, []),
     ("unet", {"blocks": 3, "channel_attention": True, "stride": 4}, ["--graph", "multiscale_s4"]),
+    ("unet_norm", {"blocks": 3, "channel_attention": True, "stride": 4, "norm": True}, ["--graph", "multiscale_s4"]),
 ])
 def test_conv_arms(root, tmp_path, arm, conv, extra):
     from hycom_emulator.datastore import HycomDatastore

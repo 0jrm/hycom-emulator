@@ -21,7 +21,12 @@ weights take their initial values. Option B needs a graph whose grid side is the
 `python -m hycom_emulator.convnet coarse_graph <nlam.yaml> <graph>` writes graph/<graph>_s<s>
 with the mesh of graph/<graph> and grid edges rebuilt by neural-lam's rules for the cell centres.
 
-Settings: the datastore config's `conv` section, {blocks, channel_attention, stride}.
+`norm` adds a per-point LayerNorm at each block's input (pre-norm). Without it, a spatially uniform
+offset in the residual stream passes each 3x3 conv multiplied by the sum of its taps, which Adam moves
+together: in emu-b00-053-conv the unet arm's decoder output grew from ~1 to ~38 in its first epoch,
+saturated the output MLP and froze the training loss at 1.1094.
+
+Settings: the datastore config's `conv` section, {blocks, channel_attention, stride, norm}.
 Importing this module registers `conv_graph_lam` and `hycom_conv_graph_lam` (with the
 prediction-time thickness projection) with neural-lam, and everything physics registers.
 """
@@ -53,11 +58,13 @@ class ConvSettings:
     blocks: int = 3
     channel_attention: bool = True
     stride: int = 1
+    norm: bool = False
 
 
 class ResBlock(nn.Module):
-    def __init__(self, width: int, channel_attention: bool):
+    def __init__(self, width: int, channel_attention: bool, norm: bool):
         super().__init__()
+        self.norm = nn.LayerNorm(width) if norm else None
         self.conv1 = nn.Conv2d(width + 1, width, 3, padding=1)
         self.conv2 = nn.Conv2d(width, width, 3, padding=1)
         nn.init.zeros_(self.conv2.weight)
@@ -69,7 +76,8 @@ class ResBlock(nn.Module):
         )
 
     def forward(self, h, mask):
-        r = self.conv2(F.silu(self.conv1(torch.cat([h, mask.expand(h.shape[0], -1, -1, -1)], 1))))
+        x = self.norm(h.permute(0, 2, 3, 1)).permute(0, 3, 1, 2) if self.norm is not None else h
+        r = self.conv2(F.silu(self.conv1(torch.cat([x, mask.expand(h.shape[0], -1, -1, -1)], 1))))
         return h + (r * self.attention(r) if self.attention is not None else r)
 
 
@@ -104,7 +112,7 @@ class ConvGraphLAM(GraphLAM):
         mask = torch.tensor(datastore.boundary_mask.values, dtype=torch.float32).reshape(1, 1, self.nx, self.ny)
         self.register_buffer("mask", mask, persistent=False)
         width = self.hidden_dim
-        blocks = lambda: nn.ModuleList(ResBlock(width, cfg.channel_attention) for _ in range(cfg.blocks))  # noqa: E731
+        blocks = lambda: nn.ModuleList(ResBlock(width, cfg.channel_attention, cfg.norm) for _ in range(cfg.blocks))  # noqa: E731
         self.encoder, self.decoder = blocks(), blocks()
         if s > 1:
             self.register_buffer("coarse_mask", F.max_pool2d(self._pad(mask), s), persistent=False)
