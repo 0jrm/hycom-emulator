@@ -18,7 +18,7 @@ neighbourhood adds. `down` starts as the block mean. Blocks see the boundary mas
 channel; land and nest-band points are not zeroed (band values are boundary data). Channel
 attention is RCAN's squeeze-excite. A GraphLAM checkpoint loads into either stride: missing conv
 weights take their initial values. Option B needs a graph whose grid side is the s x s cells:
-`python -m hycom_emulator.convnet coarse_graph <nlam.yaml> <graph>` writes graph/<graph>_s<s>
+coarse_graph (via `python -m hycom_emulator.nlam build_graph <nlam.yaml> <graph>_s<s>`) writes it
 with the mesh of graph/<graph> and grid edges rebuilt by neural-lam's rules for the cell centres.
 
 `norm` adds a per-point LayerNorm at each block's input (pre-norm). Without it, a spatially uniform
@@ -34,7 +34,6 @@ prediction-time thickness projection) with neural-lam, and everything physics re
 from __future__ import annotations
 
 import shutil
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -223,14 +222,3 @@ def coarse_graph(graph_dir: Path, xy: np.ndarray, stride: int) -> Path:
 MODELS["conv_graph_lam"] = ConvGraphLAM
 MODELS["hycom_conv_graph_lam"] = HycomConvGraphLAM
 
-if __name__ == "__main__":
-    if sys.argv[1:2] != ["coarse_graph"] or len(sys.argv) != 4:
-        raise SystemExit("usage: python -m hycom_emulator.convnet coarse_graph <nlam.yaml> <graph name>")
-    from neural_lam.config import load_config_and_datastore
-
-    import hycom_emulator.datastore  # noqa: F401  registers the hycom kind
-
-    _, ds = load_config_and_datastore(config_path=sys.argv[2])
-    stride = ConvSettings(**ds.config.get("conv", {})).stride
-    if stride > 1:
-        print(coarse_graph(ds.root_path / "graph" / sys.argv[3], ds.get_xy("state", stacked=False), stride))

@@ -14,7 +14,8 @@
 # INIT=<checkpoint> skips stage 1 and fine-tunes INIT as stage 2 (EPOCHS2 epochs, CAP2 time cap,
 # fresh optimizer); the scored checkpoint is then stage 2's own best, since its loss may differ
 # from INIT's. ARM=<arm of hycom_emulator.physics.ARMS> sets the model, loss, loss weights, conv
-# settings and graph (unet builds graph/multiscale_s4 from graph/multiscale).
+# settings and graph (the graph step builds multiscale and the arm's own, e.g. multiscale_s4 or mesh3).
+# AR2 sets stage 2's training rollout length (default 2 steps).
 # EVAL_MODEL=<neural-lam model> scores the checkpoint with that step predictor (hycom_graph_lam,
 # hycom_conv_graph_lam: the thickness projection at prediction time).
 # EPOCHS1, EPOCHS2, CAP1, CAP2, DATA, PY and GPU override the defaults (used by the CPU smoke test).
@@ -60,8 +61,8 @@ PY
 }
 
 echo "== $(date -Is) graph"
-[ -f graph/multiscale/metainfo.yaml ] || timeout 30m $PY -m hycom_emulator.nlam create_graph --config_path nlam.yaml --name multiscale
-timeout 30m $PY -m hycom_emulator.convnet coarse_graph nlam.yaml multiscale
+GRAPH=$(echo "$ARM_ARGS" | sed -n 's/.*--graph \([^ ]*\).*/\1/p')
+for g in multiscale $GRAPH; do timeout 30m $PY -m hycom_emulator.nlam build_graph nlam.yaml $g; done
 if [ -n "${INIT:-}" ]; then S1=$INIT; echo "== $(date -Is) no stage 1: fine-tuning $INIT"; else
 echo "== $(date -Is) stage 1: 1-step training"
 LOAD1=(); [ -z "${RESUME1:-}" ] || { LOAD1=(--load "$RESUME1/last.ckpt"); echo "resuming $RESUME1/last.ckpt"; }
@@ -73,7 +74,7 @@ fi
 echo "== $(date -Is) stage 2: 2-step fine-tune"
 E1=$($PY -c "import sys, torch; print(torch.load(sys.argv[1], map_location='cpu', weights_only=False)['epoch'])" "$S1")
 timeout --signal=INT ${CAP2:-210m} $PY -m hycom_emulator.nlam train_model --config_path nlam.yaml "${MODEL[@]}" \
-  --epochs $(( E1 + 1 + ${EPOCHS2:-100} )) --ar_steps_train 2 --load "$S1" --logger_run_name "$RUN_ID-s2" || echo "stage 2 exit $? (124 = time cap reached)"
+  --epochs $(( E1 + 1 + ${EPOCHS2:-100} )) --ar_steps_train ${AR2:-2} --load "$S1" --logger_run_name "$RUN_ID-s2" || echo "stage 2 exit $? (124 = time cap reached)"
 if [ -n "${INIT:-}" ]; then S2=$(best "$RUN_ID-s2"); [ -n "$S2" ] || { echo "fine-tune left no checkpoint"; exit 1; }
 else
 S2=$(lowest "$S1" "$(best "$RUN_ID-s2")")  # val uses --ar_steps_eval 2 in both stages, so the scores compare

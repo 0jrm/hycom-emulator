@@ -152,3 +152,30 @@ def test_conv_arms(root, tmp_path, arm, conv, extra):
     assert args == ["--model", "conv_graph_lam", "--loss", "hycom_wmse", *extra]
     cfg = HycomDatastore(tmp_path / "b00.yaml").config
     assert cfg["conv"] == conv and cfg["physics"]["thickness_weighted"]
+
+
+def test_mesh3_graph_takes_graph_lam_weights(root):
+    from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
+
+    from hycom_emulator.nlam import build_graph
+
+    for _ in range(2):
+        build_graph(str(root / "nlam_a.yaml"), "mesh3")
+    ds = datastore(root, "a")
+    coarse, fine = build(GraphLAM, ds), build(GraphLAM, ds, graph="mesh3")
+    fine.load_state_dict(coarse.state_dict(), strict=True)
+    x = inputs(ds)
+    assert fine(*x)[0].shape == x[0].shape
+
+
+@pytest.mark.parametrize("arm, model, extra", [("grad", "graph_lam", []), ("mesh3", "graph_lam", ["--graph", "mesh3"]),
+                                               ("conv_grad", "conv_graph_lam", [])])
+def test_sharpness_arms(root, tmp_path, arm, model, extra):
+    from hycom_emulator.datastore import HycomDatastore
+    from hycom_emulator.physics import GRADIENT_WEIGHT
+
+    (tmp_path / "b00.yaml").write_text((root / "a.yaml").read_text())
+    (tmp_path / "nlam.yaml").write_text("datastore:\n  kind: hycom\n  config_path: b00.yaml\n")
+    assert apply_arm(arm, tmp_path / "b00.yaml", tmp_path / "nlam.yaml") == ["--model", model, "--loss", "hycom_wmse", *extra]
+    physics = HycomDatastore(tmp_path / "b00.yaml").config["physics"]
+    assert physics.get("gradient", 0.0) == (0.0 if arm == "mesh3" else GRADIENT_WEIGHT)
