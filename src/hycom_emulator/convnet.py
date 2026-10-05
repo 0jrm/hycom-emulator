@@ -39,6 +39,7 @@ import torch.nn.functional as F
 from neural_lam.models import MODELS
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from hycom_emulator.physics import ThicknessProjection
 
@@ -73,8 +74,10 @@ class ResBlock(nn.Module):
 
 
 def _run(blocks, h, mask):
+    """Under autograd each block is recomputed in the backward pass: at 128 channels on 525x385 its
+    activations would not fit beside GraphLAM's at batch 4, two steps (>79 GiB on an A100 80 GB)."""
     for block in blocks:
-        h = block(h, mask)
+        h = checkpoint(block, h, mask, use_reentrant=False) if torch.is_grad_enabled() else block(h, mask)
     return h
 
 
