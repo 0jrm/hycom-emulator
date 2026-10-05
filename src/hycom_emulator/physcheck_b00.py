@@ -14,6 +14,10 @@ same checks run on the truth, the model and persistence + increments:
   lap_<field>      RMS of the 5-point Laplacian of the 24 h change of SSH, T k01, total u k01 and
                    thknss k20 (> truth: grid-scale noise added; < truth: smoothed)
   ke               mean surface kinetic energy (m2/s2)
+  grad_<field>     mean |gradient| per cell of T k01 and S k01 (front sharpness; < truth: blurred)
+  band_<field>     RMS of the 24 h change of T k01 and surface speed in the 10-50 km band: the
+                   difference of two land-aware Gaussian smooths, sigma 0.5 and 2.5 cells (half power
+                   at ~11 and ~53 km on the ~4 km grid); < truth: the change is smoothed at those scales
 
 Run `python -m hycom_emulator.physcheck_b00 <nlam.yaml> <ckpt> <out.json> [--split test] [--model hycom_graph_lam]`.
 """
@@ -25,12 +29,14 @@ import json
 from pathlib import Path
 
 import numpy as np
+from scipy.ndimage import gaussian_filter
 
 from hycom_emulator.evaluate_b00 import load
 from hycom_emulator.inspect_b00 import ONEM, Case, Forcing, Grid
 from hycom_emulator.physics import layer_columns, sigma2
 
 WHO = ("truth", "model", "pinc")
+BAND_SIGMAS = (0.5, 2.5)  # grid cells
 
 
 def checks(names, grid, inner, interior, x0, x, true) -> dict[str, float]:
@@ -59,7 +65,24 @@ def checks(names, grid, inner, interior, x0, x, true) -> dict[str, float]:
         out[f"lap_{name}"] = float(np.sqrt(np.nanmean(lap[inner] ** 2)))
     u, v = xi[:, col["u_k01"]] + xi[:, col["ubaro"]], xi[:, col["v_k01"]] + xi[:, col["vbaro"]]
     out["ke"] = float(np.mean(u**2 + v**2))
+    for name, c in (("t01", col["temp_k01"]), ("s01", col["salin_k01"])):
+        out[f"grad_{name}"] = float(np.nanmean(_gradient(grid.map(x[:, c]))[inner]))
+    speed = lambda a: np.hypot(a[:, col["u_k01"]] + a[:, col["ubaro"]], a[:, col["v_k01"]] + a[:, col["vbaro"]])  # noqa: E731
+    for name, f in (("t01", fields["t01"]), ("spd", speed)):
+        out[f"band_{name}"] = float(np.sqrt(np.nanmean(_band(grid.map(f(x) - f(x0)))[1:-1, 1:-1][inner] ** 2)))
     return out
+
+
+def _gradient(a):
+    return np.hypot(a[1:-1, 2:] - a[1:-1, :-2], a[2:, 1:-1] - a[:-2, 1:-1]) / 2
+
+
+def _band(a):
+    """a's 10-50 km band; NaN (land, nest band) stays out of both smooths."""
+    valid = np.isfinite(a)
+    filled = np.where(valid, a, 0.0)
+    smooth = [gaussian_filter(filled, s) / np.maximum(gaussian_filter(valid * 1.0, s), 1e-6) for s in BAND_SIGMAS]
+    return np.where(valid, smooth[0] - smooth[1], np.nan)
 
 
 def _laplacian(a):
