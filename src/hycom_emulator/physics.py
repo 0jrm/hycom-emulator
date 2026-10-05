@@ -37,10 +37,13 @@ from neural_lam.models import MODELS
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 
 ONEM = 9806.0  # Pa of layer thickness per metre
+GRADIENT_WEIGHT = 3.59  # gradient term 1/10 of the loss at emu-b00-053-phys2-reweight over all 115 train samples (base 0.358, raw 0.0111)
 DENSITY_WEIGHT, STABILITY_WEIGHT = 4.00e-4, 3.90e-2  # 1/9 of base 0.427 each: sigma2 term 118.6, stability 1.22 at weight 1
 MASSLESS = 1e-3 * ONEM  # Pa: a layer thinner than 1 mm holds no mass
 RHO_REF = 0.01  # kg/m3: density error that costs as much as one standardized change
 LAYERED = ("temp", "salin", "thknss", "u", "v")
+# hycom_wmse's gradient term: T and S of the top five layers, and SSH.
+GRADIENT_CHANNELS = tuple(f"{v}_k{k:02d}" for v in ("temp", "salin") for k in range(1, 6)) + ("srfhgt",)
 WEIGHTED_BY_THICKNESS = ("temp", "salin", "u", "v")
 # HYCOM's 7-term sigma-2 polynomial (stmt_fns.h, Brydon & Sun fit): sigma2(T, S) in kg/m3 - 1000.
 SIGMA2_7T = (9.77093e00, -2.26493e-02, 7.89879e-01, -6.43205e-03, -2.62983e-03, 2.75835e-05, 3.15235e-05)
@@ -59,6 +62,11 @@ ARMS = {
     "conv_noca": REWEIGHT | {"model": "conv_graph_lam", "conv": {"blocks": 3, "channel_attention": False, "stride": 1}},
     "unet": REWEIGHT | {"model": "conv_graph_lam", "conv": {"blocks": 3, "channel_attention": True, "stride": 4},
                         "graph": "multiscale_s4"},
+    # Sharpness arms (card emu-b00-053-sharp): the gradient term alone, on option A, and a 3-cell mesh.
+    "grad": REWEIGHT | {"model": "graph_lam", "physics": REWEIGHT["physics"] | {"gradient": GRADIENT_WEIGHT}},
+    "conv_grad": REWEIGHT | {"model": "conv_graph_lam", "physics": REWEIGHT["physics"] | {"gradient": GRADIENT_WEIGHT},
+                             "conv": {"blocks": 3, "channel_attention": True, "stride": 1}},
+    "mesh3": REWEIGHT | {"model": "graph_lam", "graph": "mesh3"},
     "unet_norm": REWEIGHT | {"model": "conv_graph_lam",
                              "conv": {"blocks": 3, "channel_attention": True, "stride": 4, "norm": True},
                              "graph": "multiscale_s4"},
@@ -131,13 +139,17 @@ class _Context:
         self.cols = {v: torch.tensor(layer_columns(names, v)) for v in LAYERED}
         self.mean = torch.tensor(stats.state_mean.values, dtype=torch.float32)
         self.std = torch.tensor(stats.state_std.values, dtype=torch.float32)
-        self.settings = {"thickness_weighted": False, "density": 0.0, "stability": 0.0}
+        self.grad_cols = torch.tensor([names.index(n) for n in GRADIENT_CHANNELS if n in names])
+        shape = datastore.grid_shape_state
+        self.grid = (shape.x, shape.y)
+        self.settings = {"thickness_weighted": False, "density": 0.0, "stability": 0.0, "gradient": 0.0}
         self.settings |= datastore.config.get("physics", {})
 
     def to(self, device):
         if self.mean.device != device:
             self.mean, self.std = self.mean.to(device), self.std.to(device)
             self.cols = {k: v.to(device) for k, v in self.cols.items()}
+            self.grad_cols = self.grad_cols.to(device)
         return self
 
 
@@ -158,6 +170,8 @@ def hycom_wmse(pred, target, pred_std, mask=None, average_grid=True, sum_vars=Tr
             w[..., c.cols[v]] = rel
         entry = entry * w
     loss = metrics.mask_and_reduce_metric(entry, mask=mask, average_grid=average_grid, sum_vars=sum_vars)
+    if sum_vars and average_grid and c.settings["gradient"]:
+        loss = loss + c.settings["gradient"] * gradient_error(pred, target, pred_std, mask, c)
     if not sum_vars or not (c.settings["density"] or c.settings["stability"]):
         return loss
     rho_pred = sigma2(phys(pred, "temp"), phys(pred, "salin"))
@@ -170,6 +184,24 @@ def hycom_wmse(pred, target, pred_std, mask=None, average_grid=True, sum_vars=Tr
         inversion = torch.relu(rho_pred[..., :-1] - rho_pred[..., 1:]) / RHO_REF
         extra = extra + c.settings["stability"] * (both * inversion**2).mean(-1)
     return loss + metrics.mask_and_reduce_metric(extra[..., None], mask=mask, average_grid=average_grid, sum_vars=True)
+
+
+def gradient_error(pred, target, pred_std, mask, c):
+    """Mean |horizontal difference| of the standardized error over GRADIENT_CHANNELS, between grid
+    neighbours that are both interior. pred - target is also the error of the predicted 24 h change,
+    so this is an L1 loss on the gradient of the change: it pays for a front that is in the right
+    place but blurred, which the squared error alone prefers when the front's position is uncertain."""
+    e = (pred - target)[..., c.grad_cols] / pred_std[..., c.grad_cols]
+    e = e.reshape(*e.shape[:-2], *c.grid, e.shape[-1])
+    m = torch.ones(c.grid, dtype=torch.bool, device=e.device) if mask is None else mask.reshape(c.grid)
+    total, count = 0.0, 0
+    for axis in (-3, -2):
+        n = e.shape[axis] - 1
+        d = (e.narrow(axis, 1, n) - e.narrow(axis, 0, n)).abs()
+        both = m.narrow(axis + 1, 1, n) & m.narrow(axis + 1, 0, n)
+        total = total + (d * both[..., None]).sum((-3, -2))
+        count += int(both.sum())
+    return (total / count).mean(-1)
 
 
 def group_weights(names: list[str]) -> dict[str, float]:

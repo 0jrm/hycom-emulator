@@ -1,6 +1,7 @@
 """Run a neural-lam command with the `hycom` datastore registered.
 
     python -m hycom_emulator.nlam create_graph --config_path nlam.yaml --name multiscale
+    python -m hycom_emulator.nlam build_graph nlam.yaml mesh3
     python -m hycom_emulator.nlam train_model --config_path nlam.yaml --model graph_lam ...
 """
 
@@ -45,6 +46,40 @@ def _fork_workers() -> None:
     WeatherDataModule.__init__ = init
 
 
+def build_graph(config_path: str, name: str) -> None:
+    """Build graph/<name> next to the datastore config unless it is there. multiscale: neural-lam's
+    create_graph (GraphCast-like, finest mesh 81x81, ~6x5 grid cells on 525x385). mesh3: the same layout
+    from weather-model-graphs with a 125x125 finest mesh (~4x3 cells) and levels 25x25 and 5x5. wmg
+    rounds each direction down to a power of the (odd) refinement factor: factor 3 gives 81x81 again,
+    and asking for 3 cells (0.12 deg) gives 125x25, since rows are ~0.037 deg apart; 2.5 cells gives 125
+    in both directions. <graph>_s<k>: <graph>'s mesh with grid
+    edges for k x k cells (convnet option B)."""
+    from pathlib import Path
+
+    from neural_lam.config import load_config_and_datastore
+
+    _, ds = load_config_and_datastore(config_path=config_path)
+    out = Path(ds.root_path) / "graph" / name
+    if (out / "m2g_features.pt").is_file():
+        return
+    base, _, stride = name.rpartition("_s")
+    if base and stride.isdigit():
+        from hycom_emulator.convnet import coarse_graph
+
+        build_graph(config_path, base)
+        coarse_graph(out.with_name(base), ds.get_xy("state", stacked=False), int(stride))
+    elif name == "multiscale":
+        from neural_lam.create_graph import cli
+
+        cli(["--config_path", config_path, "--name", name])
+    elif name == "mesh3":
+        from neural_lam.create_graph_with_wmg import create_graph_from_datastore
+
+        create_graph_from_datastore(ds, str(out), archetype="graphcast", mesh_grid_distance_ratio=2.5, level_refinement_factor=5)
+    else:
+        raise SystemExit(f"unknown graph {name!r}")
+
+
 def main(argv: list[str]) -> None:
     command, rest = argv[1], argv[2:]
     _load_own_checkpoints()
@@ -54,12 +89,14 @@ def main(argv: list[str]) -> None:
 
         sys.argv = ["neural_lam.create_graph", *rest]
         cli()
+    elif command == "build_graph":
+        build_graph(*rest)
     elif command == "train_model":
         from neural_lam.train_model import main as train
 
         train(rest)
     else:
-        raise SystemExit(f"unknown command {command!r}; use create_graph or train_model")
+        raise SystemExit(f"unknown command {command!r}; use create_graph, build_graph or train_model")
 
 
 if __name__ == "__main__":

@@ -5,8 +5,9 @@ import pytest
 import torch
 import xarray as xr
 from neural_lam import metrics
+from neural_lam.datastore.base import CartesianGridShape
 
-from hycom_emulator.physics import CONTEXT, ONEM, apply_arm, group_weights, hycom_wmse, layer_columns, project_thickness
+from hycom_emulator.physics import CONTEXT, ONEM, apply_arm, gradient_error, group_weights, hycom_wmse, layer_columns, project_thickness
 
 L = 3
 NAMES = [f"{v}_k{k:02d}" for v in ("temp", "salin", "thknss", "u", "v") for k in range(1, L + 1)] + ["srfhgt", "montg1", "ubaro", "vbaro"]
@@ -24,6 +25,8 @@ class _Stub:
         std = np.ones(f, np.float32)
         mean[TH], std[TH] = 50 * ONEM, 30 * ONEM
         self.stats = xr.Dataset({"state_mean": ("f", mean), "state_std": ("f", std)})
+
+    grid_shape_state = CartesianGridShape(x=2, y=3)  # the 6 points of _state
 
     def get_vars_names(self, category):
         return NAMES
@@ -179,3 +182,26 @@ def test_arm_configs_load_in_neural_lam(tmp_path):
             assert CONTEXT.settings["thickness_weighted"]  # the datastore configured hycom_wmse
             assert sum(cfg.training.state_feature_weighting.weights.values()) == pytest.approx(1.0)
             assert (ds.config["physics"]["density"] > 0) == (arm == "penalties")
+
+
+def test_gradient_term_pays_for_a_blurred_front_and_ignores_a_uniform_error():
+    stub = _Stub({"gradient": 1.0})
+    CONTEXT.configure(stub)
+    c = CONTEXT
+    col = NAMES.index("temp_k01")
+    target = torch.zeros(1, 6, len(NAMES))
+    target[0, 3:, col] = 1.0  # a front between x = 0 and x = 1
+    std = torch.ones(len(NAMES))
+    uniform = target.clone()
+    uniform[..., col] += 0.5
+    blurred = target.clone()
+    blurred[0, :, col] = 0.5
+    assert gradient_error(uniform, target, std, None, c).item() == pytest.approx(0.0)
+    assert gradient_error(blurred, target, std, None, c).item() > 0
+    mask = torch.tensor([True, True, True, False, False, False])
+    assert gradient_error(blurred, target, std, mask, c).item() == pytest.approx(0.0), "pairs touching a boundary point are ignored"
+    base = _Stub({"gradient": 0.0})
+    CONTEXT.configure(base)
+    plain = hycom_wmse(blurred, target, std)
+    CONTEXT.configure(stub)
+    assert hycom_wmse(blurred, target, std) > plain
