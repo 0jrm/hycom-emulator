@@ -49,9 +49,10 @@ def _fork_workers() -> None:
 def build_graph(config_path: str, name: str) -> None:
     """Build graph/<name> next to the datastore config unless it is there. multiscale: neural-lam's
     create_graph (GraphCast-like, finest mesh 81x81, ~6x5 grid cells on 525x385). mesh3: the same layout
-    from weather-model-graphs asked for nodes 3 cells apart; wmg rounds each direction down to a power of
-    the (odd) refinement factor, so factor 3 gives 81x81 again and factor 5 gives 125x125 (~4x3 cells),
-    with levels 25x25 and 5x5 for the long range. <graph>_s<k>: <graph>'s mesh with grid
+    from weather-model-graphs with a 125x125 finest mesh (~4x3 cells) and levels 25x25 and 5x5. wmg
+    rounds each direction down to a power of the (odd) refinement factor: factor 3 gives 81x81 again,
+    and asking for 3 cells (0.12 deg) gives 125x25, since rows are ~0.037 deg apart; 2.5 cells gives 125
+    in both directions. <graph>_s<k>: <graph>'s mesh with grid
     edges for k x k cells (convnet option B)."""
     from pathlib import Path
 
@@ -74,7 +75,7 @@ def build_graph(config_path: str, name: str) -> None:
     elif name == "mesh3":
         from neural_lam.create_graph_with_wmg import create_graph_from_datastore
 
-        create_graph_from_datastore(ds, str(out), archetype="graphcast", mesh_grid_distance_ratio=3.0, level_refinement_factor=5)
+        create_graph_from_datastore(ds, str(out), archetype="graphcast", mesh_grid_distance_ratio=2.5, level_refinement_factor=5)
     else:
         raise SystemExit(f"unknown graph {name!r}")
 

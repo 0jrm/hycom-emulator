@@ -37,7 +37,7 @@ from neural_lam.models import MODELS
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 
 ONEM = 9806.0  # Pa of layer thickness per metre
-GRADIENT_WEIGHT = 1.0  # placeholder, set by calibration before the card
+GRADIENT_WEIGHT = 3.59  # gradient term 1/10 of the loss at emu-b00-053-phys2-reweight over all 115 train samples (base 0.358, raw 0.0111)
 DENSITY_WEIGHT, STABILITY_WEIGHT = 4.00e-4, 3.90e-2  # 1/9 of base 0.427 each: sigma2 term 118.6, stability 1.22 at weight 1
 MASSLESS = 1e-3 * ONEM  # Pa: a layer thinner than 1 mm holds no mass
 RHO_REF = 0.01  # kg/m3: density error that costs as much as one standardized change
