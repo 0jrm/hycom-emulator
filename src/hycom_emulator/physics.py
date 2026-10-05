@@ -88,7 +88,9 @@ def project_thickness(state, prev_state, mean, std, th, change_var):
     return out
 
 
-class HycomGraphLAM(GraphLAM):
+class ThicknessProjection:
+    """Mixin for a neural-lam step predictor: project_thickness after the residual update."""
+
     def __init__(self, *args, datastore, **kwargs):
         super().__init__(*args, datastore=datastore, **kwargs)
         names = datastore.get_vars_names("state")
@@ -102,6 +104,10 @@ class HycomGraphLAM(GraphLAM):
     def get_clamped_new_state(self, state_delta, prev_state):
         new_state = super().get_clamped_new_state(state_delta, prev_state)
         return project_thickness(new_state, prev_state, self.state_mean, self.state_std, self.thickness_idx, self.thickness_change_var)
+
+
+class HycomGraphLAM(ThicknessProjection, GraphLAM):
+    pass
 
 
 class _Context:
