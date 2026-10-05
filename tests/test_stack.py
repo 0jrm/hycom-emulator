@@ -17,9 +17,9 @@ TRAIN_END = np.datetime64("2025-06-06")
 SPLITS = "splits:\n  train: [2025-06-01, 2025-06-06]\n  val: [2025-06-05, 2025-06-09]\n  test: [2025-06-05, 2025-06-10]\n"
 
 
-def _static():
-    x, y = np.meshgrid(-90 + 0.04 * np.arange(NX), 25 + 0.04 * np.arange(NY), indexing="ij")
-    ocean = np.ones(NX * NY, np.float32)
+def _static(nx=NX, ny=NY):
+    x, y = np.meshgrid(-90 + 0.04 * np.arange(nx), 25 + 0.04 * np.arange(ny), indexing="ij")
+    ocean = np.ones(nx * ny, np.float32)
     ocean[0] = 0
     lat = y.reshape(-1)
     static = np.stack([1000 * ocean, x.reshape(-1), lat, 1e-4 * np.sin(np.deg2rad(lat)), ocean], axis=1).astype(np.float32)
@@ -29,15 +29,16 @@ def _static():
 
 
 def _run(rng, free: bool, atm: np.ndarray):
-    state = rng.normal(size=(T, NX * NY, len(STATE))).astype(np.float32)
-    state[:, :, 2] = 50.0 + np.arange(NX * NY)  # a fixed layer thickness: its change std needs the floor
+    n = atm.shape[1]
+    state = rng.normal(size=(T, n, len(STATE))).astype(np.float32)
+    state[:, :, 2] = 50.0 + np.arange(n)  # a fixed layer thickness: its change std needs the floor
     state[:, :, 6] = 3.0  # constant everywhere, like 05.3's thknss_k01
-    forcing = np.concatenate([np.zeros((T, NX * NY, 3)) if free else rng.normal(size=(T, NX * NY, 3)), atm], axis=2)
+    forcing = np.concatenate([np.zeros((T, n, 3)) if free else rng.normal(size=(T, n, 3)), atm], axis=2)
     return state, forcing.astype(np.float32)
 
 
-def write_pack(path: Path, state: np.ndarray, forcing: np.ndarray, boundary=None) -> Path:
-    x, y, static, default_boundary = _static()
+def write_pack(path: Path, state: np.ndarray, forcing: np.ndarray, boundary=None, shape=(NX, NY)) -> Path:
+    x, y, static, default_boundary = _static(*shape)
     ocean = static[:, 4].astype(bool)
     stats = TrainStats()
     for n in np.flatnonzero(TIMES <= TRAIN_END):
