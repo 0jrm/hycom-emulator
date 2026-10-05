@@ -20,8 +20,9 @@ in the 05.3 archives). B00 trained with neural-lam's channel-wise wmse breaks bo
 - group_weights: each layered field (41 channels) and each surface field gets the same total weight,
   so SSH is 1/9 of the loss instead of 1/209.
 
-ARMS names the arms of card emu-b00-053-phys2 (all trained with GraphLAM, scored with the projection). `python -m hycom_emulator.physics arm <arm> <b00.yaml>
-<nlam.yaml>` adds the arm's settings to both files and prints the train_model arguments it needs.
+ARMS names the loss arms of card emu-b00-053-phys2 (trained with GraphLAM) and the convnet arms
+(conv, conv_noca, unet: hycom_emulator.convnet), all scored with the projection.
+`python -m hycom_emulator.physics arm <arm> <b00.yaml> <nlam.yaml>` adds the arm's settings to both files and prints the train_model arguments it needs.
 Importing this module registers `hycom_graph_lam` and `hycom_wmse` with neural-lam.
 """
 
@@ -44,14 +45,20 @@ WEIGHTED_BY_THICKNESS = ("temp", "salin", "u", "v")
 # HYCOM's 7-term sigma-2 polynomial (stmt_fns.h, Brydon & Sun fit): sigma2(T, S) in kg/m3 - 1000.
 SIGMA2_7T = (9.77093e00, -2.26493e-02, 7.89879e-01, -6.43205e-03, -2.62983e-03, 2.75835e-05, 3.15235e-05)
 
+REWEIGHT = {"loss": "hycom_wmse", "group_weights": True,
+            "physics": {"thickness_weighted": True, "density": 0.0, "stability": 0.0}}
 ARMS = {
     "control": {"model": "graph_lam", "loss": "wmse"},
-    "reweight": {"model": "graph_lam", "loss": "hycom_wmse", "group_weights": True,
-                 "physics": {"thickness_weighted": True, "density": 0.0, "stability": 0.0}},
+    "reweight": REWEIGHT | {"model": "graph_lam"},
     # Penalty weights: each penalty is 1/9 of the base loss (one variable group's share) at E1's
     # checkpoint over all 115 train samples (explore-physcheck/preflight3, 2026-10-03).
-    "penalties": {"model": "graph_lam", "loss": "hycom_wmse", "group_weights": True,
-                  "physics": {"thickness_weighted": True, "density": DENSITY_WEIGHT, "stability": STABILITY_WEIGHT}},
+    "penalties": REWEIGHT | {"model": "graph_lam",
+                             "physics": {"thickness_weighted": True, "density": DENSITY_WEIGHT, "stability": STABILITY_WEIGHT}},
+    # convnet: option A (full-resolution conv blocks) with and without channel attention; option B (stride-4 level).
+    "conv": REWEIGHT | {"model": "conv_graph_lam", "conv": {"blocks": 3, "channel_attention": True, "stride": 1}},
+    "conv_noca": REWEIGHT | {"model": "conv_graph_lam", "conv": {"blocks": 3, "channel_attention": False, "stride": 1}},
+    "unet": REWEIGHT | {"model": "conv_graph_lam", "conv": {"blocks": 3, "channel_attention": True, "stride": 4},
+                        "graph": "multiscale_s4"},
 }
 
 def sigma2(t, s):
@@ -175,9 +182,9 @@ def apply_arm(arm: str, b00_yaml, nlam_yaml) -> list[str]:
     from hycom_emulator.datastore import HycomDatastore
 
     spec = ARMS[arm]
-    if "physics" in spec:
-        cfg = yaml.safe_load(open(b00_yaml))
-        cfg["physics"] = spec["physics"]
+    sections = {k: spec[k] for k in ("physics", "conv") if k in spec}
+    if sections:
+        cfg = yaml.safe_load(open(b00_yaml)) | sections
         yaml.safe_dump(cfg, open(b00_yaml, "w"), sort_keys=False)
     if spec.get("group_weights"):
         names = HycomDatastore(b00_yaml).get_vars_names("state")
@@ -185,7 +192,7 @@ def apply_arm(arm: str, b00_yaml, nlam_yaml) -> list[str]:
         cfg["training"] = {"state_feature_weighting": {"__config_class__": "ManualStateFeatureWeighting",
                                                        "weights": group_weights(names)}}
         yaml.safe_dump(cfg, open(nlam_yaml, "w"), sort_keys=False)
-    return ["--model", spec["model"], "--loss", spec["loss"]]
+    return ["--model", spec["model"], "--loss", spec["loss"]] + (["--graph", spec["graph"]] if "graph" in spec else [])
 
 
 MODELS["hycom_graph_lam"] = HycomGraphLAM

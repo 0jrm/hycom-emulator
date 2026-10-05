@@ -6,7 +6,7 @@ import torch
 from test_stack import SPLITS, T, _run, write_pack
 
 from hycom_emulator.convnet import ConvGraphLAM, HycomConvGraphLAM, coarse_graph, grid_edges, mesh_spacing
-from hycom_emulator.physics import layer_columns
+from hycom_emulator.physics import apply_arm, layer_columns
 
 NX, NY, HIDDEN = 30, 22, 16
 
@@ -124,3 +124,18 @@ def test_projection_closes_conv_columns(root):
     assert (dp >= -1e-3).all()
     assert torch.allclose(dp.sum(-1), phys(prev).clamp_min(0).sum(-1), rtol=1e-5, atol=1e-2)
 
+
+@pytest.mark.parametrize("arm, conv, extra", [
+    ("conv", {"blocks": 3, "channel_attention": True, "stride": 1}, []),
+    ("conv_noca", {"blocks": 3, "channel_attention": False, "stride": 1}, []),
+    ("unet", {"blocks": 3, "channel_attention": True, "stride": 4}, ["--graph", "multiscale_s4"]),
+])
+def test_conv_arms(root, tmp_path, arm, conv, extra):
+    from hycom_emulator.datastore import HycomDatastore
+
+    (tmp_path / "b00.yaml").write_text((root / "a.yaml").read_text())
+    (tmp_path / "nlam.yaml").write_text("datastore:\n  kind: hycom\n  config_path: b00.yaml\n")
+    args = apply_arm(arm, tmp_path / "b00.yaml", tmp_path / "nlam.yaml")
+    assert args == ["--model", "conv_graph_lam", "--loss", "hycom_wmse", *extra]
+    cfg = HycomDatastore(tmp_path / "b00.yaml").config
+    assert cfg["conv"] == conv and cfg["physics"]["thickness_weighted"]

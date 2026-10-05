@@ -13,9 +13,10 @@
 # its last.ckpt; give CAP1 the stage-1 time it has left, so the card's GPU budget holds.
 # INIT=<checkpoint> skips stage 1 and fine-tunes INIT as stage 2 (EPOCHS2 epochs, CAP2 time cap,
 # fresh optimizer); the scored checkpoint is then stage 2's own best, since its loss may differ
-# from INIT's. ARM=<arm of hycom_emulator.physics.ARMS> sets the model, loss and loss weights.
-# EVAL_MODEL=<neural-lam model> scores the checkpoint with that step predictor (hycom_graph_lam: the
-# thickness projection at prediction time).
+# from INIT's. ARM=<arm of hycom_emulator.physics.ARMS> sets the model, loss, loss weights, conv
+# settings and graph (unet builds graph/multiscale_s4 from graph/multiscale).
+# EVAL_MODEL=<neural-lam model> scores the checkpoint with that step predictor (hycom_graph_lam,
+# hycom_conv_graph_lam: the thickness projection at prediction time).
 # EPOCHS1, EPOCHS2, CAP1, CAP2, DATA, PY and GPU override the defaults (used by the CPU smoke test).
 # Run detached: setsid nohup train_b00.sh <run_id> <out_dir> > <out_dir>/train.log 2>&1 &
 set -euo pipefail
@@ -45,7 +46,7 @@ splits:
 YAML
 printf 'datastore:\n  kind: hycom\n  config_path: b00.yaml\n' > "$OUT/nlam.yaml"
 cd "$OUT"
-MODEL+=($($PY -m hycom_emulator.physics arm "${ARM:-control}" b00.yaml nlam.yaml)); echo "arm ${ARM:-control}: ${MODEL[*]: -4}"
+ARM_ARGS=$($PY -m hycom_emulator.physics arm "${ARM:-control}" b00.yaml nlam.yaml); MODEL+=($ARM_ARGS); echo "arm ${ARM:-control}: $ARM_ARGS"
 best() { find "$OUT/runs" -path "*$1*/checkpoints/min_val_loss.ckpt" -printf "%T@ %p\n" | sort -n | tail -1 | cut -d" " -f2; }
 lowest() {  # the checkpoint with the lowest stored val loss; empty arguments are skipped
   $PY - "$@" <<'PY'
@@ -60,6 +61,7 @@ PY
 
 echo "== $(date -Is) graph"
 [ -f graph/multiscale/metainfo.yaml ] || timeout 30m $PY -m hycom_emulator.nlam create_graph --config_path nlam.yaml --name multiscale
+timeout 30m $PY -m hycom_emulator.convnet coarse_graph nlam.yaml multiscale
 if [ -n "${INIT:-}" ]; then S1=$INIT; echo "== $(date -Is) no stage 1: fine-tuning $INIT"; else
 echo "== $(date -Is) stage 1: 1-step training"
 LOAD1=(); [ -z "${RESUME1:-}" ] || { LOAD1=(--load "$RESUME1/last.ckpt"); echo "resuming $RESUME1/last.ckpt"; }
