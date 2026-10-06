@@ -69,6 +69,11 @@ ARMS = {
     "mesh3": REWEIGHT | {"model": "graph_lam", "graph": "mesh3"},
     "conv_norm": REWEIGHT | {"model": "conv_graph_lam",
                              "conv": {"blocks": 3, "channel_attention": True, "stride": 1, "norm": True}},
+    # Pre-norm arms with neural-lam's wmse (card emu-b00-e2-scratch).
+    "conv_norm_wmse": {"model": "conv_graph_lam", "loss": "wmse",
+                       "conv": {"blocks": 3, "channel_attention": True, "stride": 1, "norm": True}},
+    "unet_norm_wmse": {"model": "conv_graph_lam", "loss": "wmse", "graph": "multiscale_s4",
+                       "conv": {"blocks": 3, "channel_attention": True, "stride": 4, "norm": True}},
     "unet_norm": REWEIGHT | {"model": "conv_graph_lam",
                              "conv": {"blocks": 3, "channel_attention": True, "stride": 4, "norm": True},
                              "graph": "multiscale_s4"},

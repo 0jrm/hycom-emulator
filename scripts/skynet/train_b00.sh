@@ -15,7 +15,9 @@
 # fresh optimizer); the scored checkpoint is then stage 2's own best, since its loss may differ
 # from INIT's. ARM=<arm of hycom_emulator.physics.ARMS> sets the model, loss, loss weights, conv
 # settings and graph (the graph step builds multiscale and the arm's own, e.g. multiscale_s4 or mesh3).
-# AR2 sets stage 2's training rollout length (default 2 steps).
+# AR2 sets stage 2's training rollout length (default 2 steps). STAGE=0 reads DATA in place instead of
+# copying it to /dev/shm: the page cache then holds it as reclaimable memory, so a 195 GB stack does not
+# count toward the host-memory watchdog.
 # EVAL_MODEL=<neural-lam model> scores the checkpoint with that step predictor (hycom_graph_lam,
 # hycom_conv_graph_lam: the thickness projection at prediction time).
 # EPOCHS1, EPOCHS2, CAP1, CAP2, DATA, PY and GPU override the defaults (used by the CPU smoke test).
@@ -36,10 +38,10 @@ MODEL=(--graph multiscale --hidden_dim 128 --processor_layers 4 --batch_size 4
 
 mkdir -p "$OUT" "$SHM"
 trap 'rm -rf "$SHM"' EXIT
-echo "== $(date -Is) stage data to $SHM"
-rsync -a "$DATA/" "$SHM/b00/"
+if [ "${STAGE:-1}" = 1 ]; then echo "== $(date -Is) stage data to $SHM"; rsync -a "$DATA/" "$SHM/b00/"; ZARR=$SHM/b00
+else echo "== $(date -Is) reading $DATA in place (STAGE=0)"; ZARR=$DATA; fi
 cat > "$OUT/b00.yaml" <<YAML
-zarr: $SHM/b00
+zarr: $ZARR
 splits:
   train: [2025-03-04, 2025-07-31]
   val: [2025-08-06, 2025-08-15]

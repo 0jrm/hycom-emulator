@@ -180,3 +180,15 @@ def test_sharpness_arms(root, tmp_path, arm, model, extra):
     assert apply_arm(arm, tmp_path / "b00.yaml", tmp_path / "nlam.yaml") == ["--model", model, "--loss", "hycom_wmse", *extra]
     physics = HycomDatastore(tmp_path / "b00.yaml").config["physics"]
     assert physics.get("gradient", 0.0) == (0.0 if arm == "mesh3" else GRADIENT_WEIGHT)
+
+
+@pytest.mark.parametrize("arm, extra", [("conv_norm_wmse", []), ("unet_norm_wmse", ["--graph", "multiscale_s4"])])
+def test_wmse_pre_norm_arms(root, tmp_path, arm, extra):
+    from hycom_emulator.datastore import HycomDatastore
+
+    (tmp_path / "b00.yaml").write_text((root / "a.yaml").read_text())
+    (tmp_path / "nlam.yaml").write_text("datastore:\n  kind: hycom\n  config_path: b00.yaml\n")
+    assert apply_arm(arm, tmp_path / "b00.yaml", tmp_path / "nlam.yaml") == ["--model", "conv_graph_lam", "--loss", "wmse", *extra]
+    cfg = HycomDatastore(tmp_path / "b00.yaml").config
+    assert cfg["conv"]["norm"] and "physics" not in cfg
+    assert "training" not in (tmp_path / "nlam.yaml").read_text(), "wmse arms keep neural-lam's uniform weights"
