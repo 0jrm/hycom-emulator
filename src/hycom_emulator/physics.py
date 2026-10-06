@@ -67,6 +67,8 @@ ARMS = {
     "conv_grad": REWEIGHT | {"model": "conv_graph_lam", "physics": REWEIGHT["physics"] | {"gradient": GRADIENT_WEIGHT},
                              "conv": {"blocks": 3, "channel_attention": True, "stride": 1}},
     "mesh3": REWEIGHT | {"model": "graph_lam", "graph": "mesh3"},
+    "conv_norm": REWEIGHT | {"model": "conv_graph_lam",
+                             "conv": {"blocks": 3, "channel_attention": True, "stride": 1, "norm": True}},
     "unet_norm": REWEIGHT | {"model": "conv_graph_lam",
                              "conv": {"blocks": 3, "channel_attention": True, "stride": 4, "norm": True},
                              "graph": "multiscale_s4"},

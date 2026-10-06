@@ -141,6 +141,7 @@ def test_projection_closes_conv_columns(root):
     ("conv", {"blocks": 3, "channel_attention": True, "stride": 1}, []),
     ("conv_noca", {"blocks": 3, "channel_attention": False, "stride": 1}, []),
     ("unet", {"blocks": 3, "channel_attention": True, "stride": 4}, ["--graph", "multiscale_s4"]),
+    ("conv_norm", {"blocks": 3, "channel_attention": True, "stride": 1, "norm": True}, []),
     ("unet_norm", {"blocks": 3, "channel_attention": True, "stride": 4, "norm": True}, ["--graph", "multiscale_s4"]),
 ])
 def test_conv_arms(root, tmp_path, arm, conv, extra):
