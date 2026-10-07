@@ -29,6 +29,8 @@ packages = ["src/hycom_emulator"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A worktree tests its own src, not the checkout the shared venv's editable install points to.
+pythonpath = ["src"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
