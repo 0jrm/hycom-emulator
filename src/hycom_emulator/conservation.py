@@ -20,7 +20,10 @@ channel the mean error in units of its change std over the points neural-lam's l
 the boundary mask, below-floor fill included, unweighted) and over the real ones only) and <out_prefix>.json (per
 region, quantity and lead: mean and std of the error over forecasts, the share of forecasts with a positive error,
 and the mean one-step change of truth and model). `series` computes every quantity on every truth row of the pack,
-reading rows with pread so neither the page cache nor this process's RSS keeps them.
+reading rows with pread so neither the page cache nor this process's RSS keeps them, and the area-mean square of
+the one-day change of column heat and salt content over consecutive train rows. `forecast` also writes the
+area-mean squared error of column heat and salt content per lead: with those changes they set the scale of a
+column-content loss term (docs/conservation.md).
 """
 
 from __future__ import annotations
@@ -66,6 +69,19 @@ def functionals(names: list[str], area: np.ndarray, region: np.ndarray, level_oc
     return out
 
 
+def columns(names: list[str], level_ocean: np.ndarray, levels: np.ndarray) -> list[Functional]:
+    """Column heat and salt content at each point (J/m2, kg/m2): rho0 cp sum(T dz) and rho0 sum(S/1000 dz) over real levels."""
+    col = {n: i for i, n in enumerate(names)}
+    dz = level_weights(levels)[None] * level_ocean
+    cols = {v: np.array([col[f"{v}_{d:g}m"] for d in levels]) for v in ("temp", "salin")}
+    return [Functional("heat_column", "J/m2", cols["temp"], RHO0 * CP * dz), Functional("salt_column", "kg/m2", cols["salin"], RHO0 * 1e-3 * dz)]
+
+
+def per_point(cs: list[Functional], x: np.ndarray) -> np.ndarray:
+    """(..., grid, feature) -> (..., grid, len(cs))."""
+    return np.stack([np.einsum("...gc,gc->...g", x[..., c.cols], c.w) for c in cs], axis=-1)
+
+
 def apply(fs: list[Functional], x: np.ndarray) -> np.ndarray:
     """(..., grid, feature) -> (..., len(fs))."""
     return np.stack([np.einsum("...gc,gc->...", x[..., f.cols], f.w) for f in fs], axis=-1)
@@ -109,14 +125,14 @@ def _setup(config: Path):
     levels = meta.level.values.astype(float)
     masks = regions(meta)
     fs = {r: functionals(names, area, m, meta.level_ocean.values.astype(bool), levels) for r, m in masks.items()}
-    return meta, names, area, masks, fs
+    return meta, names, area, masks, fs, columns(names, meta.level_ocean.values.astype(bool), levels)
 
 
 def forecasts(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | None) -> tuple[dict, dict]:
     from hycom_emulator.evaluate_b00 import forecast, load
 
     ds, data, module = load(config, ckpt, split, ar_steps)
-    meta, names, area, masks, fs = _setup(config)
+    meta, names, area, masks, fs, cs = _setup(config)
     assert names == ds.get_vars_names("state"), "datastore and meta.zarr disagree on state features"
     ssh = names.index("ssh")
     idx = np.arange(len(data)) if limit is None else np.linspace(0, len(data) - 1, min(limit, len(data))).astype(int)
@@ -130,6 +146,7 @@ def forecasts(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | 
         "t0": np.zeros(n, "datetime64[ns]"),
         "loss_domain_bias": np.zeros((ar_steps, len(names))),
         "real_point_bias": np.zeros((ar_steps, len(names))),
+        "column_mse": np.zeros((ar_steps, nr, len(cs))),
     }
     loss_domain = ~meta.boundary_mask.values.astype(bool)
     real = point_weights(names, np.ones(area.size), loss_domain, meta.level_ocean.values.astype(bool), meta.level.values.astype(float))
@@ -145,7 +162,9 @@ def forecasts(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | 
         err = (pred - truth) / diff_std
         out["loss_domain_bias"] += err[:, loss_domain].mean(1) / n
         out["real_point_bias"] += np.einsum("lgf,gf->lf", err, real) / real.sum(0) / n
+        ec = per_point(cs, pred) - per_point(cs, truth)
         for r, (name, mask) in enumerate(masks.items()):
+            out["column_mse"][:, r] += np.einsum("lgc,g->lc", ec**2, area * mask) / (area * mask).sum() / n
             out["true"][i, r], out["pred"][i, r] = apply(fs[name], states_t), apply(fs[name], states_p)
             out["ssh_offset"][i, r], out["ssh_pattern"][i, r] = offset_pattern(e, area * mask)
     summary = {
@@ -163,7 +182,10 @@ def forecasts(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | 
 
 def series(config: Path) -> dict:
     """Every quantity on every row of the pack: (time, region, quantity)."""
-    meta, names, area, masks, fs = _setup(config)
+    meta, names, area, masks, fs, cs = _setup(config)
+    train = meta.time.values < np.datetime64(meta.attrs["train_end"]) + np.timedelta64(1, "D")
+    real = ~meta.time_filled.values
+    change_ms, pairs, prev = np.zeros((len(masks), len(cs))), 0, None
     path = pack_path(config) / "state.npy"
     head = np.load(path, mmap_mode="r")
     shape, dtype, offset = head.shape, head.dtype, head.offset
@@ -177,9 +199,16 @@ def series(config: Path) -> dict:
             os.posix_fadvise(fd, offset + t * row, row, os.POSIX_FADV_DONTNEED)
             for r, name in enumerate(masks):
                 values[t, r] = apply(fs[name], x)
+            now = per_point(cs, x) if train[t] and real[t] else None
+            if now is not None and prev is not None:
+                for r, mask in enumerate(masks.values()):
+                    change_ms[r] += np.einsum("gc,g->c", (now - prev) ** 2, area * mask) / (area * mask).sum()
+                pairs += 1
+            prev = now
     finally:
         os.close(fd)
     return {"time": meta.time.values, "time_filled": meta.time_filled.values, "values": values,
+            "column_change_ms": change_ms / pairs, "columns": np.array([c.name for c in cs]),
             "regions": np.array(list(masks)), "quantities": np.array([f.name for f in fs["gulf"]])}
 
 

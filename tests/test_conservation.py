@@ -1,6 +1,6 @@
 import numpy as np
 
-from hycom_emulator.conservation import CP, RHO0, apply, functionals, offset_pattern, summarize
+from hycom_emulator.conservation import CP, RHO0, apply, columns, functionals, offset_pattern, per_point, summarize
 from hycom_emulator.evaluate_rea import level_weights
 
 LEVELS = np.array([0.0, 10.0, 100.0, 2000.0])
@@ -82,3 +82,16 @@ def test_summary_reports_error_and_one_step_changes_per_lead():
     assert s["1"]["error_mean"] == 0.5 and s["2"]["error_mean"] == 1.5 and s["2"]["error_std"] == 0.5
     assert s["1"]["truth_step"] == 1.5 and s["2"]["truth_step"] == 1.0
     assert s["1"]["model_step"] == 2.0 and s["2"]["model_step"] == 2.0 and s["2"]["positive_fraction"] == 1.0
+
+
+def test_column_contents_integrate_real_levels_and_their_area_mean_is_the_content_quantity():
+    rng = np.random.default_rng(4)
+    by_name, fs, area, region, level_ocean = _setup(rng)
+    x = rng.normal(size=(N, len(NAMES)))
+    col = per_point(columns(NAMES, level_ocean, LEVELS), x)
+    dz = level_weights(LEVELS) * level_ocean
+    assert col.shape == (N, 2)
+    assert np.allclose(col[:, 0], RHO0 * CP * (x[:, _col("temp")] * dz).sum(1))
+    a = area * region
+    q = [f.name for f in fs]
+    assert np.isclose((a * col[:, 1]).sum() / a.sum(), apply(fs, x)[q.index("salt_content")])

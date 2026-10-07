@@ -192,6 +192,25 @@ def loss_domain(d: Path, config: Path) -> None:
         print(f"{path.stem:9s} " + "; ".join(row))
 
 
+def column_scale(d: Path) -> None:
+    """RMS pointwise error of column heat and salt content per lead, against the RMS one-day change on train days."""
+    if not (d / "truth_series.npz").is_file():
+        return
+    z = np.load(d / "truth_series.npz")
+    if "column_change_ms" not in z:
+        return
+    nat = np.sqrt(z["column_change_ms"])
+    print("== column content: RMS error per lead / RMS one-day train change (natural: " + "; ".join(
+        f"{r} {c} {nat[i, j]:.3g}" for i, r in enumerate(z["regions"]) for j, c in enumerate(z["columns"])) + ")")
+    for path in sorted(d.glob("s[0-9]_*.npz")):
+        f = np.load(path)
+        if "column_mse" not in f:
+            continue
+        rows = [f"{r} {c} " + " ".join(f"{np.sqrt(f['column_mse'][l, i, j]) / nat[i, j]:.2f}" for l in range(f["column_mse"].shape[0]))
+                for i, r in enumerate(z["regions"]) for j, c in enumerate(z["columns"])]
+        print(f"{path.stem:9s} " + "; ".join(rows))
+
+
 def by_band_distance(d: Path, config: Path) -> None:
     meta = xr.open_zarr(pack_path(config) / "meta.zarr", consolidated=True).load()
     nx, ny = np.unique(meta.x.values).size, np.unique(meta.y.values).size
@@ -220,4 +239,5 @@ if __name__ == "__main__":
         against_anomaly(d)
         projected(d)
     loss_domain(d, cfg)
+    column_scale(d)
     by_band_distance(d, cfg)
