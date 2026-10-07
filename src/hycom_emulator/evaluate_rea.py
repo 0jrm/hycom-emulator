@@ -72,6 +72,23 @@ def summarize(acc: dict, names: list[str], dz: np.ndarray) -> dict:
     return out
 
 
+def pack_path(config: Path) -> Path:
+    """The rea_pack folder a neural-lam config's datastore reads."""
+    return Path(yaml.safe_load((config.parent / yaml.safe_load(config.read_text())["datastore"]["config_path"]).read_text())["zarr"])
+
+
+def regions(meta: xr.Dataset) -> dict[str, np.ndarray]:
+    """Scored points per region: interior is ocean outside the boundary band, gulf the interior inside the static gulf mask."""
+    static = meta.static
+    interior = ~meta.boundary_mask.values.astype(bool) & static.sel(static_feature="ocean").values.astype(bool)
+    return {"gulf": interior & static.sel(static_feature="gulf").values.astype(bool), "interior": interior}
+
+
+def cell_area(meta: xr.Dataset) -> np.ndarray:
+    """cos^2(lat): the Mercator cell area up to a constant."""
+    return np.cos(np.deg2rad(meta.static.sel(static_feature="lat").values)) ** 2
+
+
 def in_period(target_times_ns: np.ndarray, period: tuple[str, str] | None) -> bool:
     """True if the two initial days (the two days before the first target) and every target day lie in period."""
     if period is None:
@@ -86,16 +103,11 @@ def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | N
     from hycom_emulator.evaluate_b00 import forecast, load
 
     ds, data, module = load(config, ckpt, split, ar_steps)
-    zarr = yaml.safe_load((config.parent / yaml.safe_load(config.read_text())["datastore"]["config_path"]).read_text())["zarr"]
-    meta = xr.open_zarr(Path(zarr) / "meta.zarr", consolidated=True)
+    meta = xr.open_zarr(pack_path(config) / "meta.zarr", consolidated=True).load()
     names = [str(n) for n in meta.state_feature.values]
     assert names == ds.get_vars_names("state"), "datastore and meta.zarr disagree on state features"
-    static = meta.static.load()
     levels = meta.level.values.astype(float)
-    interior = ~meta.boundary_mask.values.astype(bool) & static.sel(static_feature="ocean").values.astype(bool)
-    region = interior & static.sel(static_feature="gulf").values.astype(bool) if region_name == "gulf" else interior
-    area = np.cos(np.deg2rad(static.sel(static_feature="lat").values)) ** 2
-    w = point_weights(names, area, region, meta.level_ocean.values.astype(bool), levels)
+    w = point_weights(names, cell_area(meta), regions(meta)[region_name], meta.level_ocean.values.astype(bool), levels)
     acc: dict = {}
     indices = [i for i in range(len(data)) if in_period(data[i][3].numpy(), period)][:limit]
     for i in indices:
