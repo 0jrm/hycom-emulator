@@ -13,14 +13,26 @@
   units per step of --val_steps_to_log (`val_<quantity>_err_unroll<k>`, `val_<quantity>_sqerr_unroll<k>`).
 
 Each switch is off by default and changes no weights, so checkpoints load with or without them.
+
+    python -m hycom_emulator.rea_train probe --config_path nlam.yaml --load <ckpt> --ar_steps_train 4 --batch_size 4 \\
+        --steps 10 [--num_workers 8] [--loss rea_wmse ...] [arm flags]
+
+`probe` builds the model train_model would build for these flags, loads the checkpoint's weights and takes `steps`
+optimizer steps on train batches. It prints one JSON line: peak GPU memory (GiB; null on CPU), the median time per
+step and per data wait over the steps after the first, and the losses. It exits 1 on a non-finite loss.
 """
 
 from __future__ import annotations
 
 import argparse
 import functools
+import json
+import math
+import statistics
+import sys
+import time
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 import torch
@@ -41,18 +53,6 @@ class Options:
     log_domain_means: bool = False
 
 
-def _parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="hycom_emulator.rea_train", add_help=False, allow_abbrev=False)
-    p.add_argument("--mean_penalty", type=float)
-    p.add_argument("--mean_scales", type=Path)
-    p.add_argument("--amse", type=float, default=0.0)
-    p.add_argument("--pushforward", type=int, default=0)
-    p.add_argument("--input_noise", type=float, default=0.0)
-    p.add_argument("--checkpoint_steps", action="store_true")
-    p.add_argument("--log_domain_means", action="store_true")
-    return p
-
-
 def _value(argv: list[str], flag: str, default: str | None = None) -> str | None:
     p = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     p.add_argument(flag, default=default)
@@ -61,7 +61,14 @@ def _value(argv: list[str], flag: str, default: str | None = None) -> str | None
 
 def split_args(argv: list[str]) -> tuple[Options, list[str]]:
     """(our options, the arguments left for neural-lam). Exits with a usage error on an inconsistent set."""
-    p = _parser()
+    p = argparse.ArgumentParser(prog="hycom_emulator.rea_train", add_help=False, allow_abbrev=False)
+    p.add_argument("--mean_penalty", type=float)
+    p.add_argument("--mean_scales", type=Path)
+    p.add_argument("--amse", type=float, default=0.0)
+    p.add_argument("--pushforward", type=int, default=0)
+    p.add_argument("--input_noise", type=float, default=0.0)
+    p.add_argument("--checkpoint_steps", action="store_true")
+    p.add_argument("--log_domain_means", action="store_true")
     a, rest = p.parse_known_args(argv)
     opts = Options(**vars(a))
     rea = _value(rest, "--loss", "wmse") == "rea_wmse"
@@ -116,11 +123,10 @@ class ReaForecaster(ARForecaster):
 
     def __init__(self, predictor, datastore, pushforward: int = 0, input_noise: float = 0.0, checkpoint_steps: bool = False):
         super().__init__(predictor, datastore)
-        self.pushforward, self.checkpoint_steps = pushforward, checkpoint_steps
+        self.pushforward, self.input_noise, self.checkpoint_steps = pushforward, input_noise, checkpoint_steps
         stats = datastore.get_standardization_dataarray("state")
         noise_std = input_noise * torch.tensor(stats.state_diff_std_standardized.values, dtype=torch.float32)
         self.register_buffer("noise_std", noise_std, persistent=False)
-        self.input_noise = input_noise
 
     def forward(self, init_states, forcing_features, boundary_states):
         if not self.training:
@@ -172,3 +178,84 @@ class ReaForecasterModule(ForecasterModule):
                     logs[f"val_{name}_err_unroll{k}"] = e[:, k - 1, q].mean()
                     logs[f"val_{name}_sqerr_unroll{k}"] = (e[:, k - 1, q] ** 2).mean()
         self.log_dict(logs, on_step=False, on_epoch=True, sync_dist=True, batch_size=e.shape[0])
+
+
+def probe(argv: list[str]) -> int:
+    import neural_lam.train_model as tm
+    from neural_lam.config import load_config_and_datastore
+    from neural_lam.models import MODELS
+    from neural_lam.weather_dataset import WeatherDataset
+
+    import hycom_emulator.convnet  # noqa: F401  registers our models
+    import hycom_emulator.datastore  # noqa: F401  registers the hycom kind
+
+    opts, rest = split_args(argv)
+    p = argparse.ArgumentParser(prog="hycom_emulator.rea_train probe", allow_abbrev=False)
+    p.add_argument("--config_path", required=True)
+    p.add_argument("--load", required=True)
+    p.add_argument("--ar_steps_train", type=int, required=True)
+    p.add_argument("--batch_size", type=int, required=True)
+    p.add_argument("--steps", type=int, required=True)
+    p.add_argument("--num_workers", type=int, default=4)
+    p.add_argument("--loss", default="wmse")
+    a = p.parse_args(rest)
+    install(opts, rest)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        torch.set_float32_matmul_precision("high")
+    ckpt = torch.load(a.load, map_location="cpu", weights_only=False)
+    args = ckpt["hyper_parameters"]["args"]
+    config, ds = load_config_and_datastore(config_path=a.config_path)
+    forecaster = tm.ARForecaster(tm.build_predictor(MODELS[args.model], args, config, ds), ds)
+    module = tm.ForecasterModule(forecaster=forecaster, config=config, datastore=ds, loss=a.loss, lr=args.lr)
+    module.load_state_dict(ckpt["state_dict"])
+    module = module.to(device).train()
+    opt = module.configure_optimizers()
+    data = WeatherDataset(ds, split="train", ar_steps=a.ar_steps_train, num_past_forcing_steps=args.num_past_forcing_steps,
+                          num_future_forcing_steps=args.num_future_forcing_steps)
+    loader = torch.utils.data.DataLoader(data, batch_size=a.batch_size, shuffle=True, num_workers=a.num_workers,
+                                         multiprocessing_context="fork" if a.num_workers else None, pin_memory=device.type == "cuda")
+
+    def sync():
+        if device.type == "cuda":
+            torch.cuda.synchronize()
+
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
+    batches, losses, waits, steps = iter(loader), [], [], []
+    for _ in range(a.steps):
+        t0 = time.perf_counter()
+        batch = next(batches, None)
+        if batch is None:
+            batches = iter(loader)
+            batch = next(batches)
+        batch = module.on_after_batch_transfer([x.to(device, non_blocking=True) for x in batch], 0)
+        sync()
+        t1 = time.perf_counter()
+        loss = module._compute_prediction_and_loss(batch)[3].mean()
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+        sync()
+        waits.append(t1 - t0)
+        steps.append(time.perf_counter() - t1)
+        losses.append(loss.item())
+        if not math.isfinite(losses[-1]):
+            break
+    gib = lambda f: round(f() / 2**30, 3) if device.type == "cuda" else None  # noqa: E731
+    later = lambda v: statistics.median(v[1:]) if len(v) > 1 else None  # noqa: E731
+    print(json.dumps({
+        "ar_steps": a.ar_steps_train, "batch": a.batch_size, "loss": a.loss, "device": str(device),
+        "flags": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(opts).items()},
+        "peak_allocated_gib": gib(torch.cuda.max_memory_allocated), "peak_reserved_gib": gib(torch.cuda.max_memory_reserved),
+        "s_per_step": later(steps), "data_wait_s": later(waits), "losses": losses,
+    }), flush=True)
+    return 0 if all(map(math.isfinite, losses)) else 1
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] != ["probe"]:
+        raise SystemExit("usage: python -m hycom_emulator.rea_train probe --config_path <nlam.yaml> --load <ckpt> "
+                         "--ar_steps_train T --batch_size B --steps N [--num_workers W] [--loss ...] [arm flags]")
+    sys.exit(probe(sys.argv[2:]))
