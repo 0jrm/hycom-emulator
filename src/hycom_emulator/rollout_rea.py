@@ -417,7 +417,7 @@ def figures(stats: Path, out: Path) -> None:
             "rmse": [(f, [(d[f"rmse_{f}"], "model"), (d[f"rmse_pers_{f}"], "persistence")]) for f in FIELDS],
             "bias": [(f, [(d[f"bias_{f}"], "model"), (d[f"bias_pers_{f}"], "persistence")]) for f in FIELDS],
             "drift": [(ch, [(d[f"mean_{ch}_model"] - d[f"mean_{ch}_truth"], "model - truth")]) for ch in MEANS],
-            "ssh_bias": [("Gulf-mean SSH bias (cm), model - truth", [(100 * d.bias_ssh, "model"), ((0.5 * d.lead).broadcast_like(d.bias_ssh), "+0.5 cm/day (1-4 day eval)")])],
+            "ssh_bias": [("Gulf-mean SSH bias (cm), model - truth", [((100 * d.bias_ssh).assign_attrs(units="cm"), "model"), ((0.5 * d.lead).broadcast_like(d.bias_ssh), "+0.5 cm/day (1-4 day eval)")])],
             "energy": [("KE model/truth", [(d.ke_model / d.ke_truth, "ratio")]),
                        ("max surface speed", [(d.maxspeed_model, "model"), (d.maxspeed_truth, "truth")])]
                       + [(f"corr_change {f}", [(d[f"corr_change_{f}"], "model")]) for f in FIELDS],
