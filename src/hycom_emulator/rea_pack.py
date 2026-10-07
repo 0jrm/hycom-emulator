@@ -345,7 +345,7 @@ def _write_row(n: int) -> tuple[int, float]:
     return n, time.perf_counter() - t0
 
 
-def build(plan: Plan, out: Path, workers: int = 4) -> None:
+def build(plan: Plan, out: Path, workers: int = 32) -> None:
     out = Path(out)
     plan_file, meta = out / "plan.json", out / "meta.zarr"
     if plan_file.exists():
@@ -545,7 +545,7 @@ def main() -> None:
     b.add_argument("--stride", type=int, default=1)
     b.add_argument("--band", type=int, default=20)
     b.add_argument("--max-gap", type=int, default=3)
-    b.add_argument("--workers", type=int, default=4)
+    b.add_argument("--workers", type=int, default=32, help="parallel readers; keep under 64 on the shared server")
     a = p.parse_args()
     if a.cmd == "inventory":
         inventory(a.root, a.start, a.end)

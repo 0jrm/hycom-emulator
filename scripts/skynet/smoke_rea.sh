@@ -15,12 +15,23 @@ cd "$OUT"
 S1=(s1.pack --start 2024-08-01 --end 2024-08-10 --train-end 2024-08-07 --stride 1)
 S2=(s2.pack --start 2024-07-01 --end 2024-07-10 --train-end 2024-07-07 --stride 2)
 S4=(s4.pack --start 2018-04-27 --end 2018-05-06 --train-end 2018-05-03 --stride 4)
+peak_rss() {  # summed RSS of a process and its children, sampled until it exits
+  local m=0 r
+  while kill -0 "$1" 2>/dev/null; do
+    r=$(ps --no-headers -o rss -p "$1" --ppid "$1" | awk '{s += $1} END {print s + 0}')
+    (( r > m )) && m=$r
+    sleep 0.5
+  done
+  echo "peak RSS $(( m / 1024 )) MB"
+}
 for args in "S1[@]" "S2[@]" "S4[@]"; do
   echo "== $(date -Is) build ${!args}"
-  /usr/bin/time -f "max RSS %M kB, %e s" nice $PY -m hycom_emulator.rea_pack build "${!args}" --workers 4
+  nice $PY -m hycom_emulator.rea_pack build "${!args}" &
+  peak_rss $!
+  wait $!
 done
 echo "== $(date -Is) rebuild stride 1 (must read nothing)"
-nice $PY -m hycom_emulator.rea_pack build "${S1[@]}" --workers 4
+nice $PY -m hycom_emulator.rea_pack build "${S1[@]}"
 
 for p in s1.pack s4.pack; do
 echo "== $(date -Is) check $p"
