@@ -22,6 +22,8 @@ from pathlib import Path
 
 import numpy as np
 
+from hycom_emulator.persistence import persistence_losses
+
 RATIO, GAIN, WINDOW, FIRST_EPOCH = 0.9, 0.01, 5, 10
 
 
@@ -47,33 +49,8 @@ def stage_histories(db: Path) -> dict[str, np.ndarray]:
 
 
 def trivial_loss(config_path: str, loss_name: str, n: int = 24) -> tuple[float, float]:
-    """(one-step, two-step mean) training loss of persistence on n train samples of the run's datastore, computed
-    as ForecasterModule computes its loss: standardized states, per_var_std = diff_std / sqrt(feature weight),
-    interior mask. One sample in memory at a time."""
-    import torch
-    from neural_lam import metrics
-    from neural_lam.config import load_config_and_datastore
-    from neural_lam.loss_weighting import get_state_feature_weighting
-    from neural_lam.weather_dataset import WeatherDataset
-
-    import hycom_emulator.datastore  # noqa: F401  registers the hycom kind (and hycom_wmse's settings)
-    from hycom_emulator.physics import hycom_wmse
-
-    config, ds = load_config_and_datastore(config_path=config_path)
-    stats = ds.get_standardization_dataarray("state")
-    t = lambda name: torch.tensor(stats[name].values, dtype=torch.float32)  # noqa: E731
-    mean, std, diff_std = t("state_mean"), t("state_std"), t("state_diff_std_standardized")
-    w = torch.tensor(get_state_feature_weighting(config=config, datastore=ds), dtype=torch.float32)
-    per_var_std = diff_std / torch.sqrt(w)
-    mask = torch.tensor(~ds.boundary_mask.values.astype(bool))
-    loss = {"wmse": metrics.wmse, "hycom_wmse": hycom_wmse}[loss_name]
-    data = WeatherDataset(ds, split="train", ar_steps=2, num_past_forcing_steps=1, num_future_forcing_steps=1)
-    steps = []
-    for i in np.linspace(0, len(data) - 1, min(n, len(data))).astype(int):
-        init, target, _, _ = data[i]
-        x0, target = (init[1] - mean) / std, (target - mean) / std
-        steps.append([loss(x0[None], target[k][None], per_var_std, mask=mask).item() for k in (0, 1)])
-    s = np.array(steps)
+    """(one-step, two-step mean) training loss of persistence on n train samples of the run's datastore."""
+    s = persistence_losses(config_path, "train", 2, loss_name, n)
     return float(s[:, 0].mean()), float(s.mean(1).mean())
 
 

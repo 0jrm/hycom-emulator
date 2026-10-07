@@ -48,3 +48,24 @@ def test_check_reads_each_stage_against_its_l0(tmp_path):
     verdict = check(out, "control")
     assert verdict and verdict.startswith("x-s2 collapsed at epoch 10"), "stage 1 is healthy; stage 2 sits at L0"
     assert (out / "l0.json").is_file()
+
+
+def test_persistence_scores_every_lead_of_a_split(tmp_path, monkeypatch):
+    import json
+
+    from hycom_emulator import persistence
+    from hycom_emulator.persistence import persistence_losses
+
+    rng = np.random.default_rng(0)
+    pack = write_pack(tmp_path / "pack", *_run(rng, False, rng.normal(size=(T, 12, 1))))
+    (tmp_path / "b00.yaml").write_text(f"zarr: {pack}\n{SPLITS}")
+    (tmp_path / "nlam.yaml").write_text("datastore:\n  kind: hycom\n  config_path: b00.yaml\n")
+    s = persistence_losses(str(tmp_path / "nlam.yaml"), "train", 2)
+    assert s.shape[1] == 2 and np.isfinite(s).all() and (s > 0).all()
+    assert np.isclose(s[:, 0].mean(), trivial_loss(str(tmp_path / "nlam.yaml"), "wmse", n=len(s))[0])
+    out = tmp_path / "p.json"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("sys.argv", ["persistence", str(tmp_path / "nlam.yaml"), str(out), "--split", "train", "--ar-steps", "2"])
+    persistence.main()
+    r = json.loads(out.read_text())
+    assert set(r["per_lead"]) == {"1", "2"} and r["samples"] == len(s)
