@@ -14,7 +14,7 @@ SHM=/dev/shm/$USER/$RUN_ID
 read -r TR0 TR1 <<<"${TRAIN:-2001-01-16 2021-12-31}"
 read -r VA0 VA1 <<<"${VAL:-2022-01-01 2023-12-31}"
 read -r TE0 TE1 <<<"${TEST:-2024-01-01 2024-08-31}"
-export CUDA_VISIBLE_DEVICES=${GPU:-3}
+export CUDA_VISIBLE_DEVICES=${GPU-3}  # GPU= (empty) means CPU
 export MLFLOW_TRACKING_URI=sqlite:///$OUT/mlflow.db MLFLOW_DISABLE_AGENT_HINT=1 OMP_NUM_THREADS=8
 MODEL=(--model graph_lam --graph multiscale --hidden_dim ${HIDDEN:-128} --processor_layers ${LAYERS:-4}
        --batch_size ${BS:-8} --lr ${LR:-1e-3} --ar_steps_eval 4 --val_steps_to_log 1 2 4 --val_interval 1

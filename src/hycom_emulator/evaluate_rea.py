@@ -5,7 +5,7 @@
 Every state channel is scored at every lead: RMSE and bias of the model and of persistence, and corr_change, the
 correlation of the predicted with the true change since the initial state. T, S, u and v are also scored as
 column aggregates to 2000 m, each level weighted by the depth interval it represents. Points: the Gulf (static
-`gulf`), outside the boundary band, real at that level (`level_ocean`); weight cos^2(lat), the cell area of the
+`gulf`; or, with --region interior, all ocean as evaluate_b00 scores it), outside the boundary band, real at that level (`level_ocean`); weight cos^2(lat), the cell area of the
 Mercator grid. These are free forecasts given the true daily wind and the true boundary band: the pack has no
 increment channels and no observation enters after t0.
 """
@@ -72,7 +72,7 @@ def summarize(acc: dict, names: list[str], dz: np.ndarray) -> dict:
     return out
 
 
-def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | None = None) -> dict:
+def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | None = None, region_name: str = "gulf") -> dict:
     from hycom_emulator.evaluate_b00 import forecast, load
 
     ds, data, module = load(config, ckpt, split, ar_steps)
@@ -82,7 +82,8 @@ def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | N
     assert names == ds.get_vars_names("state"), "datastore and meta.zarr disagree on state features"
     static = meta.static.load()
     levels = meta.level.values.astype(float)
-    region = static.sel(static_feature="gulf").values.astype(bool) & ~meta.boundary_mask.values.astype(bool)
+    interior = ~meta.boundary_mask.values.astype(bool) & static.sel(static_feature="ocean").values.astype(bool)
+    region = interior & static.sel(static_feature="gulf").values.astype(bool) if region_name == "gulf" else interior
     area = np.cos(np.deg2rad(static.sel(static_feature="lat").values)) ** 2
     w = point_weights(names, area, region, meta.level_ocean.values.astype(bool), levels)
     acc: dict = {}
@@ -92,7 +93,7 @@ def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | N
         accumulate(acc, sample[0][-1].numpy(), sample[1].numpy(), forecast(module, sample), w)
     return {
         "label": "free forecast given the true daily wind and boundary band (no increments, no observations after t0)",
-        "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt), "samples": len(indices),
+        "region": region_name, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt), "samples": len(indices),
         "fields": summarize(acc, names, level_weights(levels)),
     }
 
@@ -105,8 +106,9 @@ def main() -> None:
     p.add_argument("--split", default="test")
     p.add_argument("--ar-steps", type=int, default=4)
     p.add_argument("--limit", type=int, default=None, help="score only the first n samples (smoke)")
+    p.add_argument("--region", choices=("gulf", "interior"), default="gulf", help="interior: every ocean point outside the boundary band, as evaluate_b00 scores")
     a = p.parse_args()
-    r = evaluate(a.config, a.ckpt, a.split, a.ar_steps, a.limit)
+    r = evaluate(a.config, a.ckpt, a.split, a.ar_steps, a.limit, a.region)
     a.out.write_text(json.dumps(r, indent=1))
     for name in (*LEVEL_VARS, "ssh"):
         row = " ".join(f"{lead}d {s['rmse_model'] / s['rmse_persistence']:.3f}" for lead, s in r["fields"][name].items())
