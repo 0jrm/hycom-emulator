@@ -9,7 +9,7 @@ from neural_lam import metrics
 from hycom_emulator import rea_loss
 from hycom_emulator.conservation import apply, functionals
 from hycom_emulator.evaluate_rea import cell_area, regions
-from hycom_emulator.rea_loss import QUANTITIES, DomainMeans, rea_wmse, scales_from_series
+from hycom_emulator.rea_loss import QUANTITIES, DomainMeans, _bands, amse_excess, rea_wmse, scales_from_series
 
 LEVELS = np.array([0.0, 10.0, 100.0, 2000.0])
 NAMES = [f"{v}_{d:g}m" for v in ("temp", "salin", "u", "v") for d in LEVELS] + ["ssh", "ubaro", "vbaro"]
@@ -150,3 +150,79 @@ def test_a_penalty_without_scales_is_refused():
 
 def test_registered_with_neural_lam():
     assert metrics.get_metric("rea_wmse") is rea_wmse
+
+
+def _fields(rng, b=2, t=2, f=3, nx=NX, ny=NY):
+    return torch.tensor(rng.normal(size=(b, t, nx * ny, f)), dtype=torch.float64)
+
+
+def _direct_amse(x, y, n_mask, nx, ny):
+    """Adjusted MSE per (batch, step), summed over channels, from a full numpy fft2: (..., grid, feature) masked."""
+    k = np.sqrt(np.fft.fftfreq(nx)[:, None] ** 2 + np.fft.fftfreq(ny)[None] ** 2)
+    band = np.rint(k * max(nx, ny)).astype(int).ravel()
+    spec = lambda a: np.fft.fft2(np.moveaxis(a, -1, -2).reshape(*a.shape[:-2], a.shape[-1], nx, ny), norm="ortho").reshape(*a.shape[:-2], a.shape[-1], -1)  # noqa: E731
+    X, Y = spec(x), spec(y)
+    per_band = lambda v: np.stack([v[..., band == l].sum(-1) for l in range(band.max() + 1)], -1)  # noqa: E731
+    px, py, c = per_band(np.abs(X) ** 2), per_band(np.abs(Y) ** 2), per_band((X * Y.conj()).real)
+    g = np.sqrt(px * py)
+    coh = np.divide(c, g, out=np.ones_like(c), where=g > 0)
+    return ((np.sqrt(px) - np.sqrt(py)) ** 2 + 2 * np.maximum(px, py) * (1 - coh)).sum((-2, -1)) / n_mask
+
+
+@pytest.mark.parametrize("ny", [5, 6])
+def test_band_binning_conserves_power(ny):
+    rng = np.random.default_rng(10)
+    x = torch.tensor(rng.normal(size=(3, NX, ny)))
+    band, weight, n_bands = _bands(NX, ny, torch.device("cpu"))
+    p = torch.fft.rfft2(x, norm="ortho").abs().flatten(-2) ** 2 * weight
+    per_band = torch.zeros(3, n_bands, dtype=p.dtype).index_add(-1, band, p)
+    assert torch.allclose(per_band.sum(-1), (x**2).sum((-2, -1)))
+    assert (per_band > 0).all(), "every band holds a coefficient"
+
+
+@pytest.mark.parametrize("ny", [5, 6])
+def test_wmse_plus_excess_is_the_adjusted_mse_of_a_direct_fft(ny):
+    rng = np.random.default_rng(11)
+    mask = torch.tensor(rng.uniform(size=NX * ny) > 0.3)
+    pred, target = _fields(rng, ny=ny), _fields(rng, ny=ny)
+    pred_std = torch.tensor(rng.uniform(0.5, 2.0, 3))
+    rea_loss.configure(None, None, mean_penalty=0.0, amse=1.0, grid_shape=(NX, ny))
+    got = rea_wmse(pred, target, pred_std, mask=mask)
+    m = mask.numpy()[:, None]
+    want = _direct_amse((pred / pred_std).numpy() * m, (target / pred_std).numpy() * m, m.sum(), NX, ny)
+    assert np.allclose(got.numpy(), want, rtol=1e-8)
+
+
+def test_no_excess_for_a_perfect_a_scaled_or_a_phase_shifted_prediction():
+    rng = np.random.default_rng(12)
+    target = _fields(rng)
+    pred_std = torch.ones(3, dtype=torch.float64)
+    mask = torch.tensor(rng.uniform(size=N) > 0.3)
+    assert torch.allclose(amse_excess(target, target, pred_std, mask, (NX, NY)), torch.zeros(2, 2, dtype=torch.float64), atol=1e-9)
+    assert torch.allclose(amse_excess(0.6 * target, target, pred_std, mask, (NX, NY)), torch.zeros(2, 2, dtype=torch.float64), atol=1e-9)
+    grid = target.reshape(2, 2, NX, NY, 3)
+    shifted = torch.roll(grid, shifts=(2, 1), dims=(2, 3)).reshape(target.shape)
+    assert torch.allclose(amse_excess(shifted, target, pred_std, None, (NX, NY)), torch.zeros(2, 2, dtype=torch.float64), atol=1e-9)
+    assert (metrics.wmse(shifted, target, pred_std) > 0.1).all(), "the shift itself is an error"
+
+
+def test_a_smoothed_prediction_has_a_positive_excess():
+    rng = np.random.default_rng(13)
+    target = _fields(rng)
+    grid = target.reshape(2, 2, NX, NY, 3)
+    smooth = ((grid + torch.roll(grid, 1, dims=2) + torch.roll(grid, -1, dims=2)) / 3).reshape(target.shape)
+    assert (amse_excess(smooth, target, torch.ones(3, dtype=torch.float64), None, (NX, NY)) > 1e-3).all()
+
+
+def test_amse_zero_is_exactly_wmse_and_float32_gradients_flow():
+    rng = np.random.default_rng(14)
+    meta = _meta(rng)
+    pred, target, pred_std = _batch(rng)
+    mask = _interior(meta)
+    rea_loss.configure(DomainMeans.from_meta(meta), np.ones(len(QUANTITIES)), mean_penalty=0.0, amse=0.0, grid_shape=(NX, NY))
+    assert torch.equal(rea_wmse(pred, target, pred_std, mask=mask), metrics.wmse(pred, target, pred_std, mask=mask))
+    rea_loss.configure(DomainMeans.from_meta(meta), np.ones(len(QUANTITIES)), mean_penalty=0.1, amse=0.5, grid_shape=(NX, NY))
+    pred.requires_grad_(True)
+    loss = rea_wmse(pred, target, pred_std, mask=mask)
+    loss.mean().backward()
+    assert loss.dtype == torch.float32 and torch.isfinite(pred.grad).all()
