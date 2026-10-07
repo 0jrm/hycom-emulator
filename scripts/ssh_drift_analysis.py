@@ -70,6 +70,27 @@ def scales(d: Path) -> None:
         print(f"{region:8s} " + "; ".join(f"{q} {step[:, r, k].mean():+.3g}|{step[:, r, k].std():.3g}" for k, q in enumerate(z["quantities"])))
 
 
+def level_vs_density(d: Path) -> None:
+    """Gulf-mean SSH against Gulf-mean T and S content: a linear fit on train days, then its residual per year and,
+    in 2023-2024, per month; plus the one-day SSH jumps on the days the source experiment changes."""
+    z = np.load(d / "truth_series.npz")
+    q, r = list(z["quantities"]), list(z["regions"]).index("gulf")
+    v, t = z["values"][:, r], z["time"]
+    ssh = v[:, q.index("ssh_mean")]
+    x = np.column_stack([np.ones(len(t)), v[:, q.index("temp_mean")], v[:, q.index("salin_mean")]])
+    train = (t < np.datetime64("2022-01-01")) & ~z["time_filled"]
+    coef, *_ = np.linalg.lstsq(x[train], ssh[train], rcond=None)
+    res = ssh - x @ coef
+    year = t.astype("datetime64[Y]").astype(int) + 1970
+    print(f"== Gulf SSH = {coef[0]:+.3f} {coef[1]:+.4f} T {coef[2]:+.4f} S (train fit, r2 {1 - res[train].var() / ssh[train].var():.2f}); residual (cm) per year")
+    print(" ".join(f"{y}:{100 * res[year == y].mean():+.1f}" for y in np.unique(year)))
+    ym = t.astype("datetime64[M]")
+    print("residual per month 2023-2024:", " ".join(f"{str(m)[2:]}:{100 * res[ym == m].mean():+.1f}" for m in np.unique(ym[year >= 2023])))
+    for day in ("2017-06-01", "2017-06-02", "2021-01-01", "2024-01-01", "2024-01-02", "2024-01-06", "2024-02-02", "2024-04-02"):
+        i = int(np.flatnonzero(t.astype("datetime64[D]") == np.datetime64(day))[0])
+        print(f"{day}: Gulf SSH change {100 * (ssh[i] - ssh[i - 1]):+.2f} cm, T-S residual change {100 * (res[i] - res[i - 1]):+.2f} cm")
+
+
 def against_anomaly(d: Path) -> None:
     print("== lead-1 Gulf SSH-mean error (cm) against the t0 Gulf-mean SSH relative to the train mean of that calendar month")
     z = np.load(d / "truth_series.npz")
@@ -111,7 +132,7 @@ def projected(d: Path) -> None:
         pattern, offset = f["ssh_pattern"][:, rr], f["ssh_offset"][:, rr]
         lead = np.arange(1, true.shape[1])
         step = clim[f["t0"].astype("datetime64[M]").astype(int) % 12][:, None]
-        rows = {"model": offset, "held": x0[:, None] - true[:, 1:], "clim": x0[:, None] + lead * step - true[:, 1:]}
+        rows = {"perfect mean": np.zeros_like(offset), "model": offset, "held": x0[:, None] - true[:, 1:], "clim": x0[:, None] + lead * step - true[:, 1:]}
         val = d / f"{path.stem.split('_')[0]}_val.json"
         if path.stem.endswith("_test") and val.is_file():
             bias = [v["offset_mean"] for v in json.loads(val.read_text())["regions"]["gulf"]["ssh_split"].values()]
@@ -166,6 +187,7 @@ if __name__ == "__main__":
     if (d / "truth_series.npz").is_file():
         truth_months(d)
         scales(d)
+        level_vs_density(d)
         against_anomaly(d)
         projected(d)
     loss_domain(d, cfg)
