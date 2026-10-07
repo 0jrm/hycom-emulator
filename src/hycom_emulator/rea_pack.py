@@ -45,6 +45,9 @@ DEFAULT_ROOT = "/hycom/ftp/pub/BOEM/GOMb0.04/data/daily_netcdf"
 DEFAULT_TOPO = "/hycom/ftp/pub/BOEM/GOMb0.04/topo/regional.depth.a"
 FORMAT = 1
 FILL = 1e29
+# A level that sits on the sea floor can be fill on some days and valid on others (6 points at 800 m on the
+# Blake Plateau in 2001); such points take the value of the level above. More than this fraction is a bad file.
+MAX_LOST_FRACTION = 1e-3
 DEPTH_AXIS = (0, 2, 4, 6, 8, 10, 12, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 125, 150, 200, 250, 300,
               350, 400, 500, 600, 700, 800, 900, 1000, 1250, 1500, 2000, 2500, 3000, 4000, 5000)
 DEFAULT_DEPTHS = (0, 4, 10, 20, 30, 40, 50, 70, 100, 125, 150, 200, 250, 300, 400, 500, 600, 800, 1000, 1250, 1500, 2000)
@@ -317,8 +320,12 @@ def calendar(day: np.datetime64, lat: np.ndarray, nx: int) -> np.ndarray:
 def assemble(raw, day: np.datetime64, grid: Grid) -> tuple[np.ndarray, np.ndarray]:
     """One row as (grid_index, state_feature) and (grid_index, forcing_feature), no fill values left."""
     levels, surface, wind = raw
-    if not np.array_equal(level_validity(levels), grid.level_ocean):
-        raise ValueError(f"{day}: the level validity differs from the first day's; a bad file?")
+    lost = grid.level_ocean & ~level_validity(levels)
+    if lost[0].any() or lost.sum() > MAX_LOST_FRACTION * grid.level_ocean.sum():
+        raise ValueError(f"{day}: {int(lost.sum())} points of the first day's ocean are missing ({int(lost[0].sum())} at the surface); a bad file?")
+    levels = levels.copy()
+    for k in np.flatnonzero(lost.any(axis=(1, 2))):
+        levels[:, k][:, lost[k]] = levels[:, k - 1][:, lost[k]]
     state = np.concatenate([levels.reshape(-1, *grid.ocean.shape), surface])
     real = np.concatenate([np.tile(grid.level_ocean, (len(LEVEL_VARS), 1, 1)), _valid(surface)])
     state = np.where(real, state, grid.fill[:, None, None])
