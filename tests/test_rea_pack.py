@@ -329,3 +329,37 @@ def test_datastore_opens_the_pack(pack):
     assert ds.step_length.days == 1 and ds.step_length.seconds == 0
     assert ds.grid_shape_state.x == NX and ds.grid_shape_state.y == NY
     assert not np.isnan(ds.get_dataarray("forcing", "val", standardize=True).values).any()
+
+
+def _grid(level_ocean):
+    nlev, ny, nx = level_ocean.shape
+    return rea_pack.Grid(
+        level_index=np.arange(nlev), lon=np.linspace(-90, -89, nx), lat=np.linspace(25, 26, ny), ocean=level_ocean[0],
+        level_ocean=level_ocean, static=np.zeros((1, ny, nx), np.float32), boundary=np.zeros((ny, nx), bool),
+        fill=np.full(len(rea_pack.LEVEL_VARS) * nlev + len(rea_pack.SURFACE_VARS), -1.0, np.float32),
+    )
+
+
+def test_a_bottom_point_that_turns_to_fill_takes_the_level_above():
+    ocean = np.ones((3, 40, 40), bool)
+    levels = np.stack([np.stack([np.full((40, 40), 10.0 * k + v) for k in range(3)]) for v in range(len(rea_pack.LEVEL_VARS))])
+    levels[:, 2, 5, 5] = 1.267651e30
+    surface = np.zeros((len(rea_pack.SURFACE_VARS), 40, 40))
+    state, _ = rea_pack.assemble((levels, surface, np.zeros((2, 40, 40))), np.datetime64("2001-03-03"), _grid(ocean))
+    cube = state.T.reshape(-1, 40, 40)
+    for v in range(len(rea_pack.LEVEL_VARS)):
+        assert cube[3 * v + 2, 5, 5] == 10.0 + v
+
+
+def test_a_missing_surface_point_or_many_missing_points_raise():
+    ocean = np.ones((3, 40, 40), bool)
+    levels = np.ones((len(rea_pack.LEVEL_VARS), 3, 40, 40))
+    surface = np.zeros((len(rea_pack.SURFACE_VARS), 40, 40))
+    surface_lost = levels.copy()
+    surface_lost[:, 0, 1, 1] = np.nan
+    with pytest.raises(ValueError, match="at the surface"):
+        rea_pack.assemble((surface_lost, surface, np.zeros((2, 40, 40))), np.datetime64("2001-03-03"), _grid(ocean))
+    many_lost = levels.copy()
+    many_lost[:, 2, :10, :] = np.nan
+    with pytest.raises(ValueError, match="a bad file"):
+        rea_pack.assemble((many_lost, surface, np.zeros((2, 40, 40))), np.datetime64("2001-03-03"), _grid(ocean))
