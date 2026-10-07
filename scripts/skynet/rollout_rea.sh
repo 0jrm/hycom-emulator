@@ -38,7 +38,7 @@ printf 'datastore:\n  kind: hycom\n  config_path: rea.yaml\n' > nlam.yaml
 ln -sfn "$X/emu-rea-s2b/graph" graph
 
 export PYTHONPATH=$CODE/src HYCOM_EMULATOR_SHA=$(git -C "$CODE" rev-parse HEAD) CUDA_VISIBLE_DEVICES=$GPU MLFLOW_DISABLE_AGENT_HINT=1 OMP_NUM_THREADS=8
-H=${HORIZON:-90}
+H=${HORIZON:-15}
 R=(nice "$PY" -m hycom_emulator.rollout_rea)
 cat > job.sh <<JOB
 #!/bin/bash

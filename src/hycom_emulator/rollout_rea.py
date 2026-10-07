@@ -1,6 +1,6 @@
 """Long free runs of the reanalysis emulator from many truth starts, kept as per-(start, lead) statistics.
 
-    python -m hycom_emulator.rollout_rea run <nlam.yaml> <ckpt> <out_dir> [--horizon 90] [--chunk 30] [--batch 8]
+    python -m hycom_emulator.rollout_rea run <nlam.yaml> <ckpt> <out_dir> [--horizon 15] [--chunk 15] [--batch 8]
         [--starts 2022-01-01,...] [--stride-days N] [--limit N]
     python -m hycom_emulator.rollout_rea check <nlam.yaml> <ckpt> <out.json> --starts ... --horizon H --chunk C
     python -m hycom_emulator.rollout_rea figures <stats.nc> <out_dir>
@@ -30,7 +30,7 @@ import os
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -38,6 +38,7 @@ from typing import Callable, NamedTuple
 import numpy as np
 import torch
 import xarray as xr
+from scipy import ndimage
 
 from hycom_emulator.evaluate_rea import LEVEL_VARS, level_weights, point_weights
 
@@ -48,6 +49,10 @@ REGION = ("Gulf of Mexico (static gulf) ocean points outside the boundary band; 
 FIELDS = (*LEVEL_VARS, "ssh")
 UNITS = {"temp": "degC", "salin": "psu", "u": "m/s", "v": "m/s", "ssh": "m"}
 MEANS = ("temp_0m", "temp_100m", "salin_0m", "ssh")
+BANDS = {"lt50km": (0, 50), "50to100km": (50, 100), "100to200km": (100, 200), "gt200km": (200, np.inf)}  # wavelength
+SPECTRA = ("ssh", "temp_100m")
+LC_LEVEL, LC_MIN_DEPTH, LCE_MIN_KM2 = 0.17, 500.0, 1000.0  # gom-da runs/emu-align-probe7/probe.py
+YUCATAN_STRIP = {"lat": (21.9, 22.4), "lon": (-87.0, -84.8)}
 IN_SAMPLE_END = np.datetime64("2022-01-01")
 DAY = np.timedelta64(1, "D")
 
@@ -92,6 +97,68 @@ class Geometry:
     point: torch.Tensor  # (grid, feature) float64, evaluate_rea.point_weights
     region: torch.Tensor  # (grid,) bool
     area_sum: float  # sum of area over region
+    plane: Plane | None = None  # 2D diagnostics (spectra, Loop Current); load_model sets it
+
+
+@dataclass(frozen=True)
+class Plane:
+    """The grid as (y, x) images, field.reshape(nx, ny).T, for the spectra and the Loop Current."""
+    shape: tuple[int, int]  # (nx, ny)
+    box: tuple[slice, slice]  # (y, x) bounding box of the spectral masks
+    taper: dict  # channel -> (by, bx) float64 tensor: its region mask x 2D Hann window, on the box
+    band: torch.Tensor  # (by, bx) long: BANDS index of each FFT bin by wavelength, -1 for the mean
+    lat: np.ndarray  # (ny, nx)
+    cell_km2: np.ndarray  # (ny, nx) Mercator cell area
+    gulf500: np.ndarray  # (ny, nx) bool: Gulf deeper than LC_MIN_DEPTH
+    strip: np.ndarray  # (ny, nx) bool: the Yucatan strip seed inside gulf500
+
+
+def plane(shape: tuple[int, int], lon: np.ndarray, lat: np.ndarray, depth: np.ndarray, gulf: np.ndarray,
+          masks: dict[str, np.ndarray], stride: int, device="cpu") -> Plane:
+    """lon, lat, depth, gulf and masks (channel -> region where it is scored) are (grid,) arrays."""
+    img = lambda v: v.reshape(shape).T  # noqa: E731
+    lon2, lat2 = img(lon), img(lat)
+    side = 0.04 * stride * 111.32 * np.cos(np.deg2rad(lat2))  # km
+    union = np.any([img(m) for m in masks.values()], 0)
+    ys, xs = np.nonzero(union)
+    box = (slice(ys.min(), ys.max() + 1), slice(xs.min(), xs.max() + 1))
+    window = np.outer(np.hanning(box[0].stop - box[0].start), np.hanning(box[1].stop - box[1].start))
+    dx = float(side[union].mean())
+    k = np.hypot(*np.meshgrid(np.fft.fftfreq(window.shape[0], dx), np.fft.fftfreq(window.shape[1], dx), indexing="ij"))
+    wavelength = np.divide(1.0, k, out=np.full_like(k, np.inf), where=k > 0)
+    band = np.full(k.shape, -1)
+    for i, (lo, hi) in enumerate(BANDS.values()):
+        band[(k > 0) & (wavelength >= lo) & (wavelength < hi)] = i
+    gulf500 = img(gulf) & (img(depth) > LC_MIN_DEPTH)
+    strip = (gulf500 & (lat2 >= YUCATAN_STRIP["lat"][0]) & (lat2 <= YUCATAN_STRIP["lat"][1])
+             & (lon2 >= YUCATAN_STRIP["lon"][0]) & (lon2 <= YUCATAN_STRIP["lon"][1]))
+    t = functools.partial(torch.as_tensor, device=device)
+    return Plane(shape, box, {c: t(img(m)[box] * window, dtype=torch.float64) for c, m in masks.items()}, t(band),
+                 lat2, side**2, gulf500, strip)
+
+
+def band_variance(x: torch.Tensor, pl: Plane, ch: str) -> torch.Tensor:
+    """(B, band) variance of x (B, grid) per wavelength band over the channel's region, after removing its mean
+    and tapering with a Hann window; the bands sum to the tapered variance (Parseval)."""
+    w = pl.taper[ch]
+    f = x.double().reshape(x.shape[0], *pl.shape).transpose(1, 2)[:, pl.box[0], pl.box[1]]
+    a = (f - (f * w).sum((1, 2), keepdim=True) / w.sum()) * w
+    p = torch.fft.fft2(a).abs() ** 2 / (w.numel() * (w * w).sum())
+    return torch.stack([p[:, pl.band == i].sum(1) for i in range(len(BANDS))], 1)
+
+
+def loop_current(ssh: np.ndarray, pl: Plane) -> tuple[float, int, float]:
+    """(northern extent in degrees N, LCE count, LC area km2) of one (ny, nx) SSH image, as probe7 defines them:
+    SSH minus its mean over Gulf water deeper than 500 m, the 0.17 m region of that water holding the Yucatan
+    strip seed, and eddies = the other regions of at least 1000 km2."""
+    m, w = pl.gulf500, pl.cell_km2
+    hi = m & (ssh - (ssh[m] * w[m]).sum() / w[m].sum() >= LC_LEVEL)
+    lab, n = ndimage.label(hi)
+    seed = lab[pl.strip & hi]
+    k = int(np.bincount(seed[seed > 0]).argmax()) if (seed > 0).any() else 0
+    areas = ndimage.sum(w, lab, index=np.arange(1, n + 1))
+    n_lce = sum(1 for i in range(n) if i + 1 != k and areas[i] >= LCE_MIN_KM2)
+    return (float(pl.lat[lab == k].max()), n_lce, float(areas[k - 1])) if k else (np.nan, n_lce, 0.0)
 
 
 def geometry(names: list[str], area: np.ndarray, region: np.ndarray, level_ocean: np.ndarray, levels: np.ndarray,
@@ -118,6 +185,7 @@ class Step:
     x0: torch.Tensor
     pred_prev: torch.Tensor
     truth_prev: torch.Tensor
+    cache: dict = field(default_factory=dict)  # per-step results that several STATS share
 
 
 def _err(s: Step, g: Geometry, f: str, ref: str):
@@ -162,6 +230,29 @@ def maxspeed(s: Step, g: Geometry, which: str):
     return speed[:, g.region].amax(1).double()
 
 
+def _cached(s: Step, key, compute):
+    if key not in s.cache:
+        s.cache[key] = compute()
+    return s.cache[key]
+
+
+def spectrum(s: Step, g: Geometry, ch: str, which: str, band: int):
+    def var(w):
+        return _cached(s, ("spec", ch, w), lambda: band_variance(getattr(s, w)[..., g.names.index(ch)], g.plane, ch))
+    v = var("pred") / var("truth") if which == "ratio" else var(which)
+    return v[:, band]
+
+
+def lc(s: Step, g: Geometry, which: str, item: int):
+    def rows(w):
+        def compute():
+            x = getattr(s, w)[..., g.names.index("ssh")].cpu().numpy()
+            return torch.tensor([loop_current(r.reshape(g.plane.shape).T, g.plane) for r in x], dtype=torch.float64, device=s.pred.device)
+        return _cached(s, ("lc", w), compute)
+    v = rows("pred") - rows("truth") if which == "error" else rows(which)
+    return v[:, item]
+
+
 class Stat(NamedTuple):
     fn: Callable  # (Step, Geometry) -> (B,) tensor
     units: str
@@ -183,6 +274,18 @@ def _registry() -> dict[str, Stat]:
     for which, who in (("pred", "model"), ("truth", "truth")):
         st[f"ke_{who}"] = Stat(p(ke, which=which), "m3 s-2", f"Gulf mean column kinetic energy to 2000 m per unit density, {who}")
         st[f"maxspeed_{who}"] = Stat(p(maxspeed, which=which), "m/s", f"Gulf maximum surface speed, {who}")
+    for ch in SPECTRA:
+        units = UNITS[ch.split("_")[0]]
+        for b, (name, (lo, hi)) in enumerate(BANDS.items()):
+            for which, u, who in (("pred", f"{units}2", "model"), ("truth", f"{units}2", "truth"), ("ratio", "1", "ratio model/truth")):
+                st[f"spec_{ch}_{name}_{who.split()[0]}"] = Stat(p(spectrum, ch=ch, which=which, band=b), u,
+                                                               f"variance of {ch} at wavelengths {lo}-{hi} km over the Gulf (Hann taper), {who}")
+    for item, (key, units, what) in enumerate((("north", "degrees_north", "northern extent"), ("lce", "1", "eddy (LCE) count"),
+                                               ("area", "km2", "area"))):
+        for which, who in (("pred", "model"), ("truth", "truth"), ("error", "error")):
+            if key == "north" or which != "error":
+                st[f"lc_{key}_{who}"] = Stat(p(lc, which=which, item=item), units,
+                                             f"Loop Current {what} from the 17 cm contour (probe7), {who if who != 'error' else 'model minus truth'}")
     return st
 
 
@@ -304,9 +407,13 @@ def load_model(config: Path, ckpt: Path) -> Model:
               & ~meta.boundary_mask.values.astype(bool))
     area = np.cos(np.deg2rad(static.sel(static_feature="lat").values)) ** 2
     levels = meta.level.values.astype(float)
-    geo = geometry(names, area, region, meta.level_ocean.values.astype(bool), levels, module.device)
-    window = functools.cache(lambda n: WeatherDataset(ds, split="train", ar_steps=n, num_past_forcing_steps=1, num_future_forcing_steps=1))
+    level_ocean = meta.level_ocean.values.astype(bool)
     shape = (ds.grid_shape_state.x, ds.grid_shape_state.y)
+    st = lambda f: static.sel(static_feature=f).values  # noqa: E731
+    masks = {"ssh": region, "temp_100m": region & level_ocean[:, int(np.argmin(np.abs(levels - 100)))]}
+    pl = plane(shape, st("lon"), st("lat"), st("depth"), st("gulf").astype(bool), masks, int(meta.attrs["stride"]), module.device)
+    geo = replace(geometry(names, area, region, level_ocean, levels, module.device), plane=pl)
+    window = functools.cache(lambda n: WeatherDataset(ds, split="train", ar_steps=n, num_past_forcing_steps=1, num_future_forcing_steps=1))
     return Model(module, window, ds.get_dataarray("state", "train").time.values, geo, meta, shape, ds)
 
 
@@ -428,6 +535,13 @@ def figures(stats: Path, out: Path) -> None:
             "rmse": [(f, [(d[f"rmse_{f}"], "model"), (d[f"rmse_pers_{f}"], "persistence")]) for f in FIELDS],
             "bias": [(f, [(d[f"bias_{f}"], "model"), (d[f"bias_pers_{f}"], "persistence")]) for f in FIELDS],
             "drift": [(ch, [(d[f"mean_{ch}_model"] - d[f"mean_{ch}_truth"], "model - truth")]) for ch in MEANS],
+            "spectra": [(f"{ch} variance ratio model/truth by wavelength", [(d[f"spec_{ch}_{b}_ratio"], b) for b in BANDS]) for ch in SPECTRA]
+                       + [(f"{ch} variance, {b}", [(d[f"spec_{ch}_{b}_model"], "model"), (d[f"spec_{ch}_{b}_truth"], "truth")])
+                          for ch in SPECTRA for b in BANDS],
+            "loop_current": [("LC northern extent (17 cm)", [(d.lc_north_model, "model"), (d.lc_north_truth, "truth")]),
+                             ("LC northern extent error, model - truth", [(d.lc_north_error, "model - truth")]),
+                             ("LCE count", [(d.lc_lce_model, "model"), (d.lc_lce_truth, "truth")]),
+                             ("LC area", [(d.lc_area_model, "model"), (d.lc_area_truth, "truth")])],
             "ssh_bias": [("Gulf-mean SSH bias (cm), model - truth", [((100 * d.bias_ssh).assign_attrs(units="cm"), "model"), ((0.5 * d.lead).broadcast_like(d.bias_ssh), "+0.5 cm/day (1-4 day eval)")])],
             "energy": [("KE model/truth", [(d.ke_model / d.ke_truth, "ratio")]),
                        ("max surface speed", [(d.maxspeed_model, "model"), (d.maxspeed_truth, "truth")])]
@@ -438,7 +552,7 @@ def figures(stats: Path, out: Path) -> None:
             nrow = -(-len(rows) // ncol)
             fig, axes = plt.subplots(nrow, ncol, figsize=(18, 4 * nrow), squeeze=False)
             for ax, (title, series) in zip(axes.flat, rows):
-                for (da, label), color in zip(series, ("C0", "C1")):
+                for (da, label), color in zip(series, ("C0", "C1", "C2", "C3")):
                     _band(ax, da, label, color)
                 ax.set(title=title, xlabel="lead (days)", ylabel=series[0][0].attrs.get("units", ""))
                 ax.legend(fontsize=7)
@@ -502,7 +616,7 @@ def movie(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, 
             for l in range(s.horizon):
                 frame(l)
                 writer.grab_frame()
-        for lead in (1, 30, 60, 90, 180, 365):
+        for lead in (1, 5, 10, 15, 30, 60, 90, 180, 365):
             if lead <= s.horizon:
                 frame(lead - 1)
                 fig.savefig(f"{stem}_lead{lead:03d}.png", dpi=80)
@@ -520,8 +634,8 @@ def main() -> None:
         q.add_argument("out", type=Path)
         q.add_argument("--starts", type=dates, required=cmd == "check",
                        default="2022-01-01,2022-07-01,2023-01-01".split(",") if cmd == "movie" else None)
-        q.add_argument("--horizon", type=int, default=90)
-        q.add_argument("--chunk", type=int, default=30)
+        q.add_argument("--horizon", type=int, default=15)
+        q.add_argument("--chunk", type=int, default=15)
         if cmd == "run":
             q.add_argument("--batch", type=int, default=8)
             q.add_argument("--stride-days", type=int, default=1, help="subsample the out-of-sample daily starts")

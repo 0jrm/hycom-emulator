@@ -1,11 +1,14 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import torch
+from scipy import ndimage
 
 from hycom_emulator.evaluate_rea import level_weights, point_weights
 from hycom_emulator.rollout_rea import (
-    STATS, Start, Step, done, finalize, geometry, max_horizon, rollout_stats, start_set, to_dataset, unroll,
-    window_index, write_part,
+    BANDS, STATS, Start, Step, band_variance, done, finalize, geometry, loop_current, max_horizon, plane, rollout_stats,
+    start_set, to_dataset, unroll, window_index, write_part,
 )
 
 LEVELS = np.array([0.0, 10.0, 100.0])
@@ -19,7 +22,9 @@ def _geo(rng):
     region = np.ones(G, bool)
     region[-3:] = False
     area = rng.uniform(0.5, 1.0, G)
-    return geometry(NAMES, area, region, level_ocean, LEVELS), area, region, level_ocean
+    pl = plane((5, 4), np.linspace(-90, -85, G), np.linspace(22, 26, G), np.full(G, 1000.0), np.ones(G, bool),
+               {"ssh": region, "temp_100m": region & level_ocean[:, 2]}, 2)
+    return replace(geometry(NAMES, area, region, level_ocean, LEVELS), plane=pl), area, region, level_ocean
 
 
 def _step(rng, **over):
@@ -143,7 +148,60 @@ def test_rollout_stats_are_nan_beyond_the_horizon(record):
     geo, *_ = _geo(np.random.default_rng(1))
     v = rollout_stats(module, window, times, starts, 4, geo)
     assert v.shape == (2, 20, len(STATS))
-    assert np.isfinite(v[0]).all() and np.isfinite(v[1, :starts[1].horizon]).all() and np.isnan(v[1, starts[1].horizon:]).all()
+    always = [i for i, k in enumerate(STATS) if not (k.startswith("lc_north") or k.endswith("km_ratio"))]  # toy grid: no LC, bands empty
+    assert np.isfinite(v[0][:, always]).all() and np.isfinite(v[1, :starts[1].horizon][:, always]).all()
+    assert np.isnan(v[1, starts[1].horizon:]).all()
+
+
+def _image_plane(lon1, lat1, stride=2, masks=None):
+    """Plane over a lon x lat grid, every point Gulf and 1000 m deep; returns it and (grid,) <- (ny, nx) flattening."""
+    lat2, lon2 = np.meshgrid(lat1, lon1, indexing="ij")
+    flat = lambda img: img.T.reshape(-1)  # noqa: E731
+    n = lat2.size
+    masks = masks or {"ssh": np.ones(n, bool)}
+    return plane((len(lon1), len(lat1)), flat(lon2), flat(lat2), np.full(n, 1000.0), np.ones(n, bool), masks, stride), flat, lat2, lon2
+
+
+def test_band_variance_puts_a_plane_wave_in_its_band_and_sums_to_the_tapered_variance():
+    pl, flat, lat2, lon2 = _image_plane(np.linspace(-90, -80, 128), np.zeros(96) + np.linspace(0, 1e-6, 96))
+    dx = 0.04 * 2 * 111.32
+    x = np.arange(128) * dx
+    for wavelength, band in ((75.0, "50to100km"), (30.0, "lt50km"), (400.0, "gt200km")):
+        img = np.cos(2 * np.pi * x / wavelength)[None].repeat(96, 0)
+        v = band_variance(torch.tensor(flat(img))[None], pl, "ssh")[0]
+        w = pl.taper["ssh"].numpy()
+        a = (img - (img * w).sum() / w.sum()) * w
+        assert np.isclose(v.sum().item(), (a**2).sum() / (w**2).sum(), rtol=1e-6)
+        assert v[list(BANDS).index(band)] > 0.9 * v.sum(), (wavelength, v)
+
+
+def test_band_variance_ratio_falls_at_small_scales_for_a_blurred_field():
+    pl, flat, *_ = _image_plane(np.linspace(-90, -80, 128), np.linspace(20, 20.001, 128))
+    truth = np.random.default_rng(5).normal(size=(128, 128))
+    blur = ndimage.gaussian_filter(truth, 3)
+    r = (band_variance(torch.tensor(flat(blur))[None], pl, "ssh") / band_variance(torch.tensor(flat(truth))[None], pl, "ssh"))[0]
+    assert r[0] < 0.1 and r[0] < r[1] < r[2] < r[3]
+
+
+def test_loop_current_extent_eddies_and_a_shifted_disk():
+    lon1, lat1 = np.arange(-98, -79.95, 0.1), np.arange(18, 32.01, 0.1)
+    pl, flat, lat2, lon2 = _image_plane(lon1, lat1)
+    disk = lambda la, lo, r: np.hypot(lat2 - la, lon2 - lo) <= r  # noqa: E731
+    ssh = 0.6 * disk(23.0, -86.0, 2.0) + 0.6 * disk(26.0, -93.0, 1.0) + 0.6 * disk(29.0, -88.0, 0.12)
+    north, n_lce, area = loop_current(ssh, pl)
+    assert np.isclose(north, lat2[disk(23.0, -86.0, 2.0)].max()) and n_lce == 1
+    assert np.isclose(area, pl.cell_km2[disk(23.0, -86.0, 2.0)].sum())
+    shifted = 0.6 * disk(24.0, -86.0, 2.0) + 0.6 * disk(26.0, -93.0, 1.0)
+    assert np.isclose(loop_current(shifted, pl)[0] - north, 1.0, atol=0.051)
+    no_lc = 0.6 * disk(26.0, -93.0, 1.0)
+    assert np.isnan(loop_current(no_lc, pl)[0]) and loop_current(no_lc, pl)[1] == 1
+    s = torch.tensor(np.stack([flat(ssh), flat(shifted)]), dtype=torch.float64)
+    x = torch.zeros(2, s.shape[1], 1, dtype=torch.float64)
+    names = ["ssh"]
+    geo = type("G", (), {"names": names, "plane": pl})()
+    step = Step(s[[1, 1]][..., None], s[..., None], x, x, x)
+    err = STATS["lc_north_error"].fn(step, geo)
+    assert np.isclose(err[0].item(), loop_current(shifted, pl)[0] - north) and err[1].item() == 0.0
 
 
 def test_rmse_bias_match_a_masked_column_computation():
