@@ -74,6 +74,12 @@ def against_anomaly(d: Path) -> None:
         err = f["pred"][:, rr, 1, qq] - f["true"][:, rr, 1, qq]
         step = f["true"][:, rr, 1, qq] - f["true"][:, rr, 0, qq]
         slope, icpt = np.polyfit(anom, err, 1)
+        month = f["t0"].astype("datetime64[M]").astype(int) % 12 + 1
+        for name, scale, unit in (("ssh_mean", 100, "cm"), ("temp_mean", 1000, "mK"), ("v_mean", 100, "cm/s")):
+            j = list(f["quantities"]).index(name)
+            e1 = f["pred"][:, rr, 1, j] - f["true"][:, rr, 1, j]
+            by = " ".join(f"{m}:{scale * e1[month == m].mean():+.2f}" for m in np.unique(month))
+            print(f"{path.stem:9s} lead-1 {name} error by start month ({unit}): {by}")
         print(f"{path.stem:9s} anomaly mean {100 * anom.mean():+.2f} cm sd {100 * anom.std():.2f}; error = {icpt * 100:+.3f} cm "
               f"{slope:+.4f} x anomaly; corr(err, anomaly) {np.corrcoef(anom, err)[0, 1]:+.2f}, corr(err, truth step) {np.corrcoef(step, err)[0, 1]:+.2f}")
 
@@ -96,6 +102,10 @@ def projected(d: Path) -> None:
         lead = np.arange(1, true.shape[1])
         step = clim[f["t0"].astype("datetime64[M]").astype(int) % 12][:, None]
         rows = {"model": offset, "held": x0[:, None] - true[:, 1:], "clim": x0[:, None] + lead * step - true[:, 1:]}
+        val = d / f"{path.stem.split('_')[0]}_val.json"
+        if path.stem.endswith("_test") and val.is_file():
+            bias = [v["offset_mean"] for v in json.loads(val.read_text())["regions"]["gulf"]["ssh_split"].values()]
+            rows["model - val offset"] = offset - np.array(bias)
         out = " | ".join(f"{k} " + " ".join(f"{100 * np.sqrt(np.mean(o**2 + pattern**2, 0))[l]:.3f}" for l in range(len(lead))) for k, o in rows.items())
         print(f"{path.stem:9s} {out}")
 
