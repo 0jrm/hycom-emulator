@@ -60,6 +60,16 @@ def truth_months(d: Path) -> None:
     print("== Gulf-mean SSH level by year (cm):", " ".join(f"{y}:{100 * ssh[1:][year == y].mean():+.1f}" for y in np.unique(year)))
 
 
+def scales(d: Path) -> None:
+    """Natural size of each quantity's one-day change on train days: the scale a domain-mean loss term divides by."""
+    z = np.load(d / "truth_series.npz")
+    ok = ~(z["time_filled"][1:] | z["time_filled"][:-1]) & (z["time"][1:] < np.datetime64("2022-01-01"))
+    step = np.diff(z["values"], axis=0)[ok]
+    print("== train one-day change of each quantity: mean | sd (units of the quantity per day)")
+    for r, region in enumerate(z["regions"]):
+        print(f"{region:8s} " + "; ".join(f"{q} {step[:, r, k].mean():+.3g}|{step[:, r, k].std():.3g}" for k, q in enumerate(z["quantities"])))
+
+
 def against_anomaly(d: Path) -> None:
     print("== lead-1 Gulf SSH-mean error (cm) against the t0 Gulf-mean SSH relative to the train mean of that calendar month")
     z = np.load(d / "truth_series.npz")
@@ -155,6 +165,7 @@ if __name__ == "__main__":
     forecasts_table(d)
     if (d / "truth_series.npz").is_file():
         truth_months(d)
+        scales(d)
         against_anomaly(d)
         projected(d)
     loss_domain(d, cfg)
