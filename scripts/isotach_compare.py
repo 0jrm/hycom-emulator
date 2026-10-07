@@ -4,7 +4,7 @@ For each lead L and each pair of days (t, t+L) inside a split, truth(t) is the f
 truth(t+L). Prints per-lead medians and the Spearman correlation of the surrogate with each
 Hausdorff variant over the samples where both fronts exist; writes every sample to the JSON.
 
-Run `python scripts/isotach_compare.py <pack_dir> <out.json> [--leads 1 2] [--max-samples N]`.
+Run `python scripts/isotach_compare.py <pack_dir> <out.json> [--leads 1 2] [--max-samples N] [--lon-min -90]`.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ METRICS = ("hausdorff_km", "mean_km", "p95_km")
 
 
 class Pack:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, lon_min: float | None = None):
         meta = xr.open_zarr(path / "meta.zarr", consolidated=True)
         self.times = meta.time.values.astype("datetime64[D]")
         names = [str(f) for f in meta.state_feature.values]
@@ -45,6 +45,8 @@ class Pack:
         self.shape = (x.size // nx, nx)
         static = {str(n): to_grid(meta.static.sel(static_feature=n).values, self.shape) for n in ("lon", "lat", "depth")}
         self.region = gulf_region(static["lon"], static["lat"], static["depth"])
+        if lon_min is not None:
+            self.region &= static["lon"] >= lon_min
         self.cell_km = mercator_cell_km(static["lat"])
         self.state = np.load(path / "state.npy", mmap_mode="r")
         self._speed: dict[int, np.ndarray] = {}
@@ -55,8 +57,9 @@ class Pack:
             self._speed[i] = surface_speed(*to_grid(a, self.shape))
         return self._speed[i]
 
-    def pairs(self, split: str, lead: int) -> list[tuple[int, int]]:
+    def pairs(self, split: str, lead_days: int) -> list[tuple[int, int]]:
         lo, hi = (np.datetime64(d) for d in SPLITS[split])
+        lead = np.timedelta64(lead_days, "D")
         idx = {t: i for i, t in enumerate(self.times)}
         return [(idx[t], idx[t + lead]) for t in self.times if lo <= t and t + lead <= hi and t + lead in idx]
 
@@ -77,7 +80,7 @@ def sample(pack: Pack, i0: int, i1: int, timings: dict[str, list[float]]) -> dic
     loss.backward()
     timings["isotach_loss_bwd"].append(time.perf_counter() - t)
     return {"init": str(pack.times[i0]), "valid": str(pack.times[i1]), "status": str(fd.status),
-            **{m: float(getattr(fd, m)) for m in METRICS}, "surrogate": float(loss)}
+            **{m: float(getattr(fd, m)) for m in METRICS}, "surrogate": loss.item()}
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -96,10 +99,11 @@ def main() -> None:
     p.add_argument("out", type=Path)
     p.add_argument("--leads", type=int, nargs="+", default=[1, 2])
     p.add_argument("--max-samples", type=int, default=None, help="per lead, for a smoke run")
+    p.add_argument("--lon-min", type=float, default=None, help="also drop the region west of this longitude")
     a = p.parse_args()
-    pack = Pack(a.pack)
+    pack = Pack(a.pack, a.lon_min)
     timings: dict[str, list[float]] = {k: [] for k in ("front_distance", "isotach_target", "isotach_loss_fwd", "isotach_loss_bwd")}
-    result = {"pack": str(a.pack), "splits": SPLITS, "region_pixels": int(pack.region.sum()), "leads": {}}
+    result = {"pack": str(a.pack), "splits": SPLITS, "lon_min": a.lon_min, "region_pixels": int(pack.region.sum()), "leads": {}}
     for lead in a.leads:
         pairs = [pr for split in SPLITS for pr in pack.pairs(split, lead)][: a.max_samples]
         rows = [sample(pack, i0, i1, timings) for i0, i1 in pairs]
