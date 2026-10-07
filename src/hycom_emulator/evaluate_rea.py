@@ -89,7 +89,17 @@ def cell_area(meta: xr.Dataset) -> np.ndarray:
     return np.cos(np.deg2rad(meta.static.sel(static_feature="lat").values)) ** 2
 
 
-def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | None = None, region_name: str = "gulf") -> dict:
+def in_period(target_times_ns: np.ndarray, period: tuple[str, str] | None) -> bool:
+    """True if the two initial days (the two days before the first target) and every target day lie in period."""
+    if period is None:
+        return True
+    t = np.asarray(target_times_ns).astype("datetime64[ns]")
+    first_init = t[0] - np.timedelta64(2, "D")
+    return bool(first_init >= np.datetime64(period[0]) and t[-1] <= np.datetime64(period[1]) + np.timedelta64(1, "D") - np.timedelta64(1, "ns"))
+
+
+def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | None = None, region_name: str = "gulf",
+             period: tuple[str, str] | None = None) -> dict:
     from hycom_emulator.evaluate_b00 import forecast, load
 
     ds, data, module = load(config, ckpt, split, ar_steps)
@@ -99,13 +109,13 @@ def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | N
     levels = meta.level.values.astype(float)
     w = point_weights(names, cell_area(meta), regions(meta)[region_name], meta.level_ocean.values.astype(bool), levels)
     acc: dict = {}
-    indices = range(len(data))[:limit]
+    indices = [i for i in range(len(data)) if in_period(data[i][3].numpy(), period)][:limit]
     for i in indices:
         sample = data[i]
         accumulate(acc, sample[0][-1].numpy(), sample[1].numpy(), forecast(module, sample), w)
     return {
         "label": "free forecast given the true daily wind and boundary band (no increments, no observations after t0)",
-        "region": region_name, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt), "samples": len(indices),
+        "region": region_name, "period": list(period) if period else None, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt), "samples": len(indices),
         "fields": summarize(acc, names, level_weights(levels)),
     }
 
@@ -119,8 +129,9 @@ def main() -> None:
     p.add_argument("--ar-steps", type=int, default=4)
     p.add_argument("--limit", type=int, default=None, help="score only the first n samples (smoke)")
     p.add_argument("--region", choices=("gulf", "interior"), default="gulf", help="interior: every ocean point outside the boundary band, as evaluate_b00 scores")
+    p.add_argument("--period", nargs=2, metavar=("START", "END"), help="score only forecasts whose initial and target days lie in [START, END], e.g. one source experiment")
     a = p.parse_args()
-    r = evaluate(a.config, a.ckpt, a.split, a.ar_steps, a.limit, a.region)
+    r = evaluate(a.config, a.ckpt, a.split, a.ar_steps, a.limit, a.region, tuple(a.period) if a.period else None)
     a.out.write_text(json.dumps(r, indent=1))
     for name in (*LEVEL_VARS, "ssh"):
         row = " ".join(f"{lead}d {s['rmse_model'] / s['rmse_persistence']:.3f}" for lead, s in r["fields"][name].items())
