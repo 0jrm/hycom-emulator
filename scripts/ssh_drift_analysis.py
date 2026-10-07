@@ -70,17 +70,22 @@ def scales(d: Path) -> None:
         print(f"{region:8s} " + "; ".join(f"{q} {step[:, r, k].mean():+.3g}|{step[:, r, k].std():.3g}" for k, q in enumerate(z["quantities"])))
 
 
+def ts_residual(z) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Gulf-mean SSH minus its linear fit on Gulf-mean T and S over train days: (coef, residual per row, train rows)."""
+    q, r = list(z["quantities"]), list(z["regions"]).index("gulf")
+    v, t = z["values"][:, r], z["time"]
+    x = np.column_stack([np.ones(len(t)), v[:, q.index("temp_mean")], v[:, q.index("salin_mean")]])
+    train = (t < np.datetime64("2022-01-01")) & ~z["time_filled"]
+    coef, *_ = np.linalg.lstsq(x[train], v[train, q.index("ssh_mean")], rcond=None)
+    return coef, v[:, q.index("ssh_mean")] - x @ coef, train
+
+
 def level_vs_density(d: Path) -> None:
     """Gulf-mean SSH against Gulf-mean T and S content: a linear fit on train days, then its residual per year and,
     in 2023-2024, per month; plus the one-day SSH jumps on the days the source experiment changes."""
     z = np.load(d / "truth_series.npz")
-    q, r = list(z["quantities"]), list(z["regions"]).index("gulf")
-    v, t = z["values"][:, r], z["time"]
-    ssh = v[:, q.index("ssh_mean")]
-    x = np.column_stack([np.ones(len(t)), v[:, q.index("temp_mean")], v[:, q.index("salin_mean")]])
-    train = (t < np.datetime64("2022-01-01")) & ~z["time_filled"]
-    coef, *_ = np.linalg.lstsq(x[train], ssh[train], rcond=None)
-    res = ssh - x @ coef
+    t, ssh = z["time"], z["values"][:, list(z["regions"]).index("gulf"), list(z["quantities"]).index("ssh_mean")]
+    coef, res, train = ts_residual(z)
     year = t.astype("datetime64[Y]").astype(int) + 1970
     print(f"== Gulf SSH = {coef[0]:+.3f} {coef[1]:+.4f} T {coef[2]:+.4f} S (train fit, r2 {1 - res[train].var() / ssh[train].var():.2f}); residual (cm) per year")
     print(" ".join(f"{y}:{100 * res[year == y].mean():+.1f}" for y in np.unique(year)))
@@ -98,6 +103,8 @@ def against_anomaly(d: Path) -> None:
     month = z["time"].astype("datetime64[M]").astype(int) % 12
     train = z["time"] < np.datetime64("2022-01-01")
     clim = np.array([z["values"][train & (month == m), r, q].mean() for m in range(12)])
+    _, res, _ = ts_residual(z)
+    pooled = []
     for path in sorted(d.glob("s[0-9]_*.npz")):
         f = np.load(path)
         rr, qq = list(f["regions"]).index("gulf"), list(f["quantities"]).index("ssh_mean")
@@ -111,8 +118,25 @@ def against_anomaly(d: Path) -> None:
             e1 = f["pred"][:, rr, 1, j] - f["true"][:, rr, 1, j]
             by = " ".join(f"{m}:{scale * e1[month == m].mean():+.2f}" for m in np.unique(month))
             print(f"{path.stem:9s} lead-1 {name} error by start month ({unit}): {by}")
+        days = z["time"].astype("datetime64[D]")
+        res0 = res[np.searchsorted(days, f["t0"].astype("datetime64[D]"))]
+        model_step = f["pred"][:, rr, 1, qq] - f["true"][:, rr, 0, qq]
+        pooled.append((res0, err, model_step, step))
+        k, c = np.polyfit(res0, err, 1)
+        print(f"{path.stem:9s} t0 T-S residual mean {100 * res0.mean():+.2f} cm sd {100 * res0.std():.2f}; lead-1 error = {100 * c:+.3f} cm "
+              f"{k:+.4f} x residual, corr {np.corrcoef(res0, err)[0, 1]:+.2f}; corr(model step, residual) {np.corrcoef(res0, model_step)[0, 1]:+.2f}, "
+              f"corr(truth step, residual) {np.corrcoef(res0, step)[0, 1]:+.2f}")
         print(f"{path.stem:9s} anomaly mean {100 * anom.mean():+.2f} cm sd {100 * anom.std():.2f}; error = {icpt * 100:+.3f} cm "
               f"{slope:+.4f} x anomaly; corr(err, anomaly) {np.corrcoef(anom, err)[0, 1]:+.2f}, corr(err, truth step) {np.corrcoef(step, err)[0, 1]:+.2f}")
+    print("== s2 forecasts of all splits pooled, against the t0 T-S residual")
+    _pooled_fit([p for p, path in zip(pooled, sorted(d.glob("s[0-9]_*.npz"))) if path.stem.startswith("s2_")])
+
+
+def _pooled_fit(pooled: list) -> None:
+    res0, err, model_step, step = (np.concatenate(a) for a in zip(*pooled))
+    for name, y in (("lead-1 error", err), ("model step", model_step), ("truth step", step)):
+        k, c = np.polyfit(res0, y, 1)
+        print(f"pooled n={res0.size}: {name} = {100 * c:+.3f} cm {k:+.4f} x t0 residual, corr {np.corrcoef(res0, y)[0, 1]:+.2f}")
 
 
 def projected(d: Path) -> None:
