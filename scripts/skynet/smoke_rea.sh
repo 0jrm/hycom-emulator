@@ -18,7 +18,7 @@ S4=(s4.pack --start 2018-04-27 --end 2018-05-06 --train-end 2018-05-03 --stride 
 peak_rss() {  # summed RSS of a process and its children, sampled until it exits
   local m=0 r
   while kill -0 "$1" 2>/dev/null; do
-    r=$(ps --no-headers -o rss -p "$1" --ppid "$1" | awk '{s += $1} END {print s + 0}')
+    r=$(ps --no-headers -o rss -p "$1" --ppid "$1" | awk '{s += $1} END {print s + 0}') || break  # exited since kill -0
     (( r > m )) && m=$r
     sleep 0.5
   done
