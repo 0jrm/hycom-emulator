@@ -3,8 +3,10 @@
     python -m hycom_emulator.nlam create_graph --config_path nlam.yaml --name multiscale
     python -m hycom_emulator.nlam build_graph nlam.yaml mesh3
     python -m hycom_emulator.nlam train_model --config_path nlam.yaml --model graph_lam ...
+    python -m hycom_emulator.nlam train_model ... --model crps_graph_lam --loss afcrps --members 2 --init_from <ckpt>
 
-train_model also takes the arm flags of hycom_emulator.rea_train.
+train_model also takes the arm flags of hycom_emulator.rea_train. With --model crps_graph_lam, --checkpoint_steps
+belongs to hycom_emulator.ensemble, which takes its flags first.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import sys
 import hycom_emulator.datastore  # noqa: F401  registers DATASTORES["hycom"]
 import hycom_emulator.convnet  # noqa: F401  registers the conv models and, via physics, hycom_graph_lam and hycom_wmse
 import hycom_emulator.rea_loss  # noqa: F401  registers rea_wmse
+from hycom_emulator import ensemble  # registers crps_graph_lam, afcrps and fcrps
 
 
 def _load_own_checkpoints() -> None:
@@ -121,13 +124,16 @@ def main(argv: list[str]) -> None:
     elif command == "build_graph":
         build_graph(*rest)
     elif command == "train_model":
-        from neural_lam.train_model import main as train
+        from neural_lam import train_model
 
         from hycom_emulator import rea_train
 
+        if rea_train._value(rest, "--model", "graph_lam") == "crps_graph_lam":
+            ens, rest = ensemble.split_args(rest)
+            train_model.ForecasterModule = ensemble.module_factory(ens.members, ens.init_from, ens.checkpoint_steps)
         opts, rest = rea_train.split_args(rest)
         rea_train.install(opts, rest)
-        train(rest)
+        train_model.main(rest)
     else:
         raise SystemExit(f"unknown command {command!r}; use create_graph, build_graph or train_model")
 
