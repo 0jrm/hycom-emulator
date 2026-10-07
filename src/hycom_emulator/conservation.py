@@ -14,16 +14,15 @@ Weights are those of hycom_emulator.evaluate_rea: area cos^2(lat) on the region'
 of each level on points real at that level (`level_ocean`). Regions: gulf and interior (all ocean outside the
 boundary band). Since each quantity is linear, the error of the quantity is the quantity of the error.
 
-`forecast` runs the model on a split and writes <out_prefix>.npz (per forecast: x0, truth and prediction of every
-quantity, the SSH error's area-mean offset and pattern RMSE; over all forecasts: the mean SSH error map, and per
-channel the mean error in units of its change std over the points neural-lam's loss counts (every point outside
-the boundary mask, below-floor fill included, unweighted) and over the real ones only) and <out_prefix>.json (per
-region, quantity and lead: mean and std of the error over forecasts, the share of forecasts with a positive error,
-and the mean one-step change of truth and model). `series` computes every quantity on every truth row of the pack,
-reading rows with pread so neither the page cache nor this process's RSS keeps them, and the area-mean square of
-the one-day change of column heat and salt content over consecutive train rows. `forecast` also writes the
-area-mean squared error of column heat and salt content per lead: with those changes they set the scale of a
-column-content loss term (docs/conservation.md).
+`forecast` runs the model on a split. <out_prefix>.json holds, per region, quantity and lead, the mean and std of
+the error over forecasts, the share of positive errors and the mean one-day change of truth and model.
+<out_prefix>.npz holds every forecast's values, the SSH error split into area-mean offset and pattern RMSE, the
+mean SSH error map, the area-mean squared error of pointwise column heat and salt content, and each channel's mean
+error in change stds over the points neural-lam's loss counts (fill included) and over real points only.
+
+`series` computes every quantity on every truth row of the pack, plus the area-mean square of the one-day change of
+column heat and salt content over train rows: the scales of the loss terms in docs/conservation.md. It reads rows
+with pread and drops them from the page cache, so memory stays flat.
 """
 
 from __future__ import annotations
