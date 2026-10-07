@@ -211,6 +211,24 @@ def column_scale(d: Path) -> None:
         print(f"{path.stem:9s} " + "; ".join(rows))
 
 
+def mean_term(d: Path) -> None:
+    """Size of a domain-mean loss term at this checkpoint: mean over forecasts of (interior-mean error / train sd of the
+    interior-mean one-day change)^2 per quantity and lead (heat and salt content duplicate temp and salin means)."""
+    z = np.load(d / "truth_series.npz")
+    ok = ~(z["time_filled"][1:] | z["time_filled"][:-1]) & (z["time"][1:] < np.datetime64("2022-01-01"))
+    r = list(z["regions"]).index("interior")
+    scale = np.diff(z["values"][:, r], axis=0)[ok].std(0)
+    keep = [k for k, q in enumerate(z["quantities"]) if q not in ("heat_content", "salt_content")]
+    names = np.array(z["quantities"])[keep]
+    print("== domain-mean term per lead: sum over quantities of mean (e_mean / s)^2, interior; largest contributors")
+    for path in sorted(d.glob("s[0-9]_*.npz")):
+        f = np.load(path)
+        e = (f["pred"][:, r, 1:] - f["true"][:, r, 1:])[..., keep] / scale[keep]
+        term = (e**2).mean(0)
+        top = "; ".join(f"lead {l + 1}: " + " ".join(f"{names[k]} {term[l, k]:.2f}" for k in np.argsort(term[l])[::-1][:3]) for l in range(term.shape[0]))
+        print(f"{path.stem:9s} sum " + " ".join(f"{t:.2f}" for t in term.sum(1)) + f" | {top}")
+
+
 def by_band_distance(d: Path, config: Path) -> None:
     meta = xr.open_zarr(pack_path(config) / "meta.zarr", consolidated=True).load()
     nx, ny = np.unique(meta.x.values).size, np.unique(meta.y.values).size
@@ -239,5 +257,7 @@ if __name__ == "__main__":
         against_anomaly(d)
         projected(d)
     loss_domain(d, cfg)
+    if (d / "truth_series.npz").is_file():
+        mean_term(d)
     column_scale(d)
     by_band_distance(d, cfg)
