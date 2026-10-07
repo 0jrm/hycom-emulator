@@ -75,6 +75,11 @@ class HycomDatastore(BaseRegularGridDatastore):
         return self._config
 
     @property
+    def meta(self) -> xr.Dataset:
+        """The opened store: meta.zarr's variables plus state and forcing."""
+        return self._ds
+
+    @property
     def exclude_source_changes(self) -> bool:
         return bool(self._config.get("exclude_source_changes", False))
 
