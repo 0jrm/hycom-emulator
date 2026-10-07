@@ -1,7 +1,7 @@
 """Arm switches for reanalysis-emulator training: our flags, taken off train_model's arguments before neural-lam parses them.
 
     python -m hycom_emulator.nlam train_model --config_path nlam.yaml ... --loss rea_wmse --mean_penalty 0.0016 \\
-        --mean_scales truth_series.npz [--amse 0.1] [--pushforward 1] [--input_noise 0.1] [--checkpoint_steps]
+        --mean_scales truth_series.npz [--amse 0.1] [--pushforward 1] [--input_noise 0.1] [--checkpoint_steps] [--log_domain_means]
 
 - --mean_penalty, --mean_scales, --amse: the weights of rea_loss.rea_wmse (needs --loss rea_wmse; --mean_penalty 0
   is the control). --mean_scales is a `conservation series` npz; its train rows give the scales.
@@ -9,6 +9,8 @@
   state the model made itself instead of backpropagating through the whole chain.
 - --input_noise a: Gaussian noise of a times each channel's one-day change std on the two initial states (interior).
 - --checkpoint_steps: recompute each step's activations in the backward pass (memory for time).
+- --log_domain_means: also log, in validation, the Gulf-mean error and squared error of each rea_loss quantity in SI
+  units per step of --val_steps_to_log (`val_<quantity>_err_unroll<k>`, `val_<quantity>_sqerr_unroll<k>`).
 
 Each switch is off by default and changes no weights, so checkpoints load with or without them.
 """
@@ -22,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from neural_lam.models import ARForecaster
+from neural_lam.models import ARForecaster, ForecasterModule
 from torch.utils.checkpoint import checkpoint
 
 from hycom_emulator import rea_loss
@@ -36,6 +38,7 @@ class Options:
     pushforward: int = 0
     input_noise: float = 0.0
     checkpoint_steps: bool = False
+    log_domain_means: bool = False
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -46,6 +49,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--pushforward", type=int, default=0)
     p.add_argument("--input_noise", type=float, default=0.0)
     p.add_argument("--checkpoint_steps", action="store_true")
+    p.add_argument("--log_domain_means", action="store_true")
     return p
 
 
@@ -73,7 +77,7 @@ def split_args(argv: list[str]) -> tuple[Options, list[str]]:
 
 
 def install(opts: Options, rest: list[str]) -> None:
-    """Configure rea_wmse and swap neural-lam's forecaster class for what opts asks."""
+    """Configure rea_wmse and swap neural-lam's forecaster and module classes for what opts asks."""
     import neural_lam.train_model as tm
     from neural_lam.config import load_config_and_datastore
 
@@ -93,6 +97,9 @@ def install(opts: Options, rest: list[str]) -> None:
         tm.ARForecaster = functools.partial(ReaForecaster, pushforward=opts.pushforward, input_noise=opts.input_noise,
                                             checkpoint_steps=opts.checkpoint_steps)
         on.append(f"ReaForecaster pushforward {opts.pushforward} input_noise {opts.input_noise:g} checkpoint_steps {opts.checkpoint_steps}")
+    if opts.log_domain_means:
+        tm.ForecasterModule = ReaForecasterModule
+        on.append("validation logs Gulf-mean errors")
     print("rea_train: " + ("; ".join(on) if on else "no arm switch on"), flush=True)
 
 
@@ -139,3 +146,29 @@ class ReaForecaster(ARForecaster):
                 stds.append(pred_std)
             prev_prev_state, prev_state = prev_state, new_state
         return torch.stack(predictions, dim=1), torch.stack(stds, dim=1) if stds else None
+
+
+class ReaForecasterModule(ForecasterModule):
+    """ForecasterModule that also logs, in validation, the batch-mean Gulf-mean error and squared error of each
+    rea_loss quantity (SI units) at each step of val_steps_to_log. No __init__ of its own: Lightning's
+    save_hyperparameters reads ForecasterModule's."""
+
+    _domain_means: rea_loss.DomainMeans | None = None
+
+    def _compute_prediction_and_loss(self, batch):
+        out = super()._compute_prediction_and_loss(batch)
+        if self._trainer is not None and self._trainer.validating:
+            self._log_domain_means(out[0], out[1])
+        return out
+
+    def _log_domain_means(self, prediction, target):
+        if self._domain_means is None:
+            self._domain_means = rea_loss.DomainMeans.from_meta(self.datastore.meta).to(prediction.device)
+        e = self._domain_means.errors(prediction, target)  # (batch, step, quantity)
+        logs = {}
+        for k in self.hparams.val_steps_to_log:
+            if k <= e.shape[1]:
+                for q, name in enumerate(self._domain_means.names):
+                    logs[f"val_{name}_err_unroll{k}"] = e[:, k - 1, q].mean()
+                    logs[f"val_{name}_sqerr_unroll{k}"] = (e[:, k - 1, q] ** 2).mean()
+        self.log_dict(logs, on_step=False, on_epoch=True, sync_dist=True, batch_size=e.shape[0])

@@ -108,6 +108,7 @@ def test_split_args_takes_our_flags_and_leaves_neural_lams():
                              "--amse", "0.1", "--pushforward", "1", "--input_noise", "0.2", "--checkpoint_steps", "--lr", "1e-4"])
     assert opts == Options(0.0016, rea_train.Path("s.npz"), 0.1, 1, 0.2, True)
     assert rest == ["--config_path", "n.yaml", "--loss", "rea_wmse", "--lr", "1e-4"]
+    assert split_args(["--log_domain_means", "--val_steps_to_log", "1", "4"]) == (Options(log_domain_means=True), ["--val_steps_to_log", "1", "4"])
     assert split_args(["--loss", "rea_wmse", "--mean_penalty", "0"])[0].mean_penalty == 0.0
     assert split_args(["--loss", "wmse"]) == (Options(), ["--loss", "wmse"])
 
@@ -126,6 +127,11 @@ def test_split_args_refuses_an_inconsistent_set(argv):
 
 def test_install_swaps_the_forecaster_class(monkeypatch):
     monkeypatch.setattr(tm, "ARForecaster", tm.ARForecaster)
+    monkeypatch.setattr(tm, "ForecasterModule", tm.ForecasterModule)
+    rea_train.install(Options(), ["--config_path", "n.yaml"])
+    assert tm.ARForecaster is ARForecaster and tm.ForecasterModule is rea_train.ForecasterModule
+    rea_train.install(Options(log_domain_means=True), ["--config_path", "n.yaml"])
+    assert tm.ForecasterModule is rea_train.ReaForecasterModule and tm.ARForecaster is ARForecaster
     rea_train.install(Options(pushforward=1), ["--config_path", "n.yaml"])
     fc = tm.ARForecaster(_Linear(), _Store())
     assert isinstance(fc, ReaForecaster) and fc.pushforward == 1
