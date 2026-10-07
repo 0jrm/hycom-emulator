@@ -25,6 +25,7 @@ import argparse
 import functools
 import hashlib
 import json
+import mmap
 import os
 import shutil
 import subprocess
@@ -285,6 +286,7 @@ class Model:
     geo: Geometry
     meta: xr.Dataset
     shape: tuple[int, int]  # (nx, ny); grid_index = ix * ny + iy
+    datastore: object
 
 
 def load_model(config: Path, ckpt: Path) -> Model:
@@ -305,7 +307,15 @@ def load_model(config: Path, ckpt: Path) -> Model:
     geo = geometry(names, area, region, meta.level_ocean.values.astype(bool), levels, module.device)
     window = functools.cache(lambda n: WeatherDataset(ds, split="train", ar_steps=n, num_past_forcing_steps=1, num_future_forcing_steps=1))
     shape = (ds.grid_shape_state.x, ds.grid_shape_state.y)
-    return Model(module, window, ds.get_dataarray("state", "train").time.values, geo, meta, shape)
+    return Model(module, window, ds.get_dataarray("state", "train").time.values, geo, meta, shape, ds)
+
+
+def release_pack_pages(datastore) -> None:
+    """Unmap the pack rows read so far; they stay in the page cache. Without this RssFile grows with every row
+    touched, up to the whole pack (157 GB at stride 2)."""
+    for name in ("state", "forcing"):
+        if isinstance(data := datastore._ds[name].data, np.memmap):
+            data._mmap.madvise(mmap.MADV_DONTNEED)
 
 
 def _md5(path: Path) -> str:
@@ -355,6 +365,7 @@ def run(config: Path, ckpt: Path, out: Path, horizon: int, chunk: int, batch: in
         values = rollout_stats(m.module, m.window, m.times, group, chunk, m.geo)
         attrs["created"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         write_part(parts, to_dataset(group, values, attrs))
+        release_pack_pages(m.datastore)
         sec, n = time.perf_counter() - t0, sum(s.horizon for s in group)
         rss, gpu = _rss_gib(), _gpu_gib()
         total = {"sample_steps": total["sample_steps"] + n, "seconds": total["seconds"] + sec,
