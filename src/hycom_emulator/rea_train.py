@@ -78,6 +78,8 @@ def split_args(argv: list[str]) -> tuple[Options, list[str]]:
         p.error("--mean_penalty and --amse need --loss rea_wmse")
     if opts.mean_penalty and opts.mean_scales is None:
         p.error("--mean_penalty > 0 needs --mean_scales")
+    if opts.log_domain_means and _value(rest, "--model", "graph_lam") == "crps_graph_lam":
+        p.error("--log_domain_means replaces ForecasterModule, which crps_graph_lam's ensemble module also replaces")
     if min(opts.mean_penalty or 0.0, opts.amse, opts.pushforward, opts.input_noise) < 0:
         p.error("weights, --pushforward and --input_noise are >= 0")
     return opts, rest

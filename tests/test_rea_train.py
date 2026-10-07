@@ -119,6 +119,10 @@ def test_split_args_takes_our_flags_and_leaves_neural_lams():
     ["--loss", "wmse", "--amse", "0.1"],
     ["--loss", "rea_wmse", "--mean_penalty", "0.1"],
     ["--pushforward", "-1"],
+    ["--model", "crps_graph_lam", "--loss", "afcrps", "--mean_penalty", "0.0016", "--mean_scales", "s.npz"],
+    ["--model", "crps_graph_lam", "--loss", "fcrps", "--mean_penalty", "0"],
+    ["--model", "crps_graph_lam", "--loss", "afcrps", "--amse", "0.1"],
+    ["--model", "crps_graph_lam", "--loss", "afcrps", "--log_domain_means"],
 ])
 def test_split_args_refuses_an_inconsistent_set(argv):
     with pytest.raises(SystemExit):
