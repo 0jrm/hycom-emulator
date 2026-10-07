@@ -98,7 +98,7 @@ def main(argv: list[str]) -> None:
 
         ens, rest = ensemble.split_args(rest)
         if ens.model == "crps_graph_lam":
-            train_model.ForecasterModule = ensemble.module_factory(ens.members, ens.init_from)
+            train_model.ForecasterModule = ensemble.module_factory(ens.members, ens.init_from, ens.checkpoint_steps)
         train_model.main(rest)
     else:
         raise SystemExit(f"unknown command {command!r}; use create_graph, build_graph or train_model")

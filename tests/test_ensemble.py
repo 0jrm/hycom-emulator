@@ -179,9 +179,28 @@ def test_ensemble_module_refuses_other_losses_and_models(ds):
 
 def test_split_args():
     ours, rest = split_args(["--config_path", "x.yaml", "--model", "graph_lam", "--epochs", "3", "--model", "crps_graph_lam",
-                             "--members", "4", "--init_from", "a.ckpt", "--loss", "afcrps"])
-    assert (ours.model, ours.members, ours.init_from) == ("crps_graph_lam", 4, "a.ckpt")
+                             "--members", "4", "--init_from", "a.ckpt", "--checkpoint_steps", "--loss", "afcrps"])
+    assert (ours.model, ours.members, ours.init_from, ours.checkpoint_steps) == ("crps_graph_lam", 4, "a.ckpt", True)
     assert rest == ["--config_path", "x.yaml", "--epochs", "3", "--loss", "afcrps", "--model", "crps_graph_lam"]
     assert split_args(["--model", "graph_lam"])[1] == ["--model", "graph_lam"]
     with pytest.raises(SystemExit, match="crps_graph_lam"):
         split_args(["--model", "graph_lam", "--members", "2"])
+
+
+def test_checkpointed_steps_give_the_same_loss_and_gradients(ds, tmp_path):
+    _, module = ensemble_module(ds, tmp_path)
+    for layer in module.forecaster.predictor.film:
+        torch.nn.init.normal_(layer.weight, std=0.1)
+    module.train()
+    batch = rollout_batch(ds[1])
+    grads = []
+    for flag in (False, True):
+        module.forecaster.predictor.checkpoint_steps = flag
+        module.zero_grad()
+        torch.manual_seed(5)
+        loss = module._compute_prediction_and_loss(batch)[3]
+        loss.mean().backward()
+        grads.append((loss.detach(), [p.grad.clone() for p in module.parameters() if p.grad is not None]))
+    (l0, g0), (l1, g1) = grads
+    assert torch.equal(l0, l1) and len(g0) == len(g1)
+    assert all(torch.allclose(a, b, rtol=1e-5, atol=1e-7) for a, b in zip(g0, g1)), "recomputed steps must redraw the same noise"

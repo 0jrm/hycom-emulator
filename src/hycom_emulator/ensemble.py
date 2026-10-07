@@ -18,9 +18,11 @@ sum over channels. Validation and test metrics see the ensemble mean.
 
     train_model --model crps_graph_lam --loss afcrps --members 2 --init_from <graph_lam.ckpt>
 
-`--members` (default 2) and `--init_from` are ours: hycom_emulator.nlam strips them before neural-lam
-parses the rest. `--init_from` loads a checkpoint's weights only, so training starts at epoch 0; `--load`
-keeps its usual meaning (resume, epoch included). Importing this module registers `crps_graph_lam`,
+`--members` (default 2), `--init_from` and `--checkpoint_steps` are ours: hycom_emulator.nlam strips them
+before neural-lam parses the rest. `--init_from` loads a checkpoint's weights only, so training starts at
+epoch 0; `--load` keeps its usual meaning (weights and epoch) and also takes a graph_lam checkpoint.
+`--checkpoint_steps` recomputes each step's activations in the backward pass: GPU memory then grows with the
+rollout only by the saved states, which long (8-21 day) rollouts need. Importing this module registers `crps_graph_lam`,
 `afcrps` (alpha 0.95) and `fcrps` (alpha 1).
 """
 
@@ -34,6 +36,7 @@ from neural_lam import metrics
 from neural_lam.models import MODELS, ForecasterModule
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 NOISE_DIM = 32
 FILM = "film."
@@ -47,7 +50,15 @@ class CRPSGraphLAM(GraphLAM):
         for layer in self.film:
             nn.init.zeros_(layer.weight)
         self.noise_scale = 1.0
+        self.checkpoint_steps = False
         self.register_load_state_dict_pre_hook(_fill_film)
+
+    def forward(self, prev_state, prev_prev_state, forcing):
+        """With checkpoint_steps, a step's activations are recomputed in the backward pass (with the same noise:
+        checkpoint restores the RNG state), so a rollout holds one step's activations instead of all of them."""
+        if self.checkpoint_steps and torch.is_grad_enabled():
+            return checkpoint(super().forward, prev_state, prev_prev_state, forcing, use_reentrant=False)
+        return super().forward(prev_state, prev_prev_state, forcing)
 
     def process_step(self, mesh_rep):
         batch_size = mesh_rep.shape[0]
@@ -118,11 +129,12 @@ class EnsembleForecasterModule(ForecasterModule):
         return (weigh(ens.var(1) * (m + 1) / m).mean() / weigh((ens.mean(1) - target) ** 2).mean()).sqrt()
 
 
-def module_factory(members: int, init_from: str | None):
+def module_factory(members: int, init_from: str | None, checkpoint_steps: bool = False):
     """What train_model calls in place of ForecasterModule (it passes keywords only)."""
 
     def build(**kwargs):
         module = EnsembleForecasterModule(**kwargs, members=members)
+        module.forecaster.predictor.checkpoint_steps = checkpoint_steps
         if init_from:
             state = torch.load(init_from, map_location="cpu", weights_only=False)["state_dict"]
             module.load_state_dict(state, strict=True)
@@ -136,10 +148,11 @@ def split_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     p = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     p.add_argument("--members", type=int, default=2)
     p.add_argument("--init_from", default=None)
+    p.add_argument("--checkpoint_steps", action="store_true")
     p.add_argument("--model", default="graph_lam")
     ours, rest = p.parse_known_args(argv)
-    if ours.model != "crps_graph_lam" and ({"--members", "--init_from"} & {a.split("=")[0] for a in argv}):
-        raise SystemExit("--members and --init_from need --model crps_graph_lam")
+    if ours.model != "crps_graph_lam" and ({"--members", "--init_from", "--checkpoint_steps"} & {a.split("=")[0] for a in argv}):
+        raise SystemExit("--members, --init_from and --checkpoint_steps need --model crps_graph_lam")
     return ours, rest + ["--model", ours.model]
 
 
