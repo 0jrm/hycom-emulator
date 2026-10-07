@@ -3,6 +3,8 @@
     python -m hycom_emulator.nlam create_graph --config_path nlam.yaml --name multiscale
     python -m hycom_emulator.nlam build_graph nlam.yaml mesh3
     python -m hycom_emulator.nlam train_model --config_path nlam.yaml --model graph_lam ...
+
+train_model also takes the arm flags of hycom_emulator.rea_train.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import sys
 
 import hycom_emulator.datastore  # noqa: F401  registers DATASTORES["hycom"]
 import hycom_emulator.convnet  # noqa: F401  registers the conv models and, via physics, hycom_graph_lam and hycom_wmse
+import hycom_emulator.rea_loss  # noqa: F401  registers rea_wmse
 
 
 def _load_own_checkpoints() -> None:
@@ -44,6 +47,31 @@ def _fork_workers() -> None:
             self.multiprocessing_context = "fork"
 
     WeatherDataModule.__init__ = init
+
+
+def _exclude_source_changes() -> None:
+    """With `exclude_source_changes: true` in the datastore yaml, keep only the train samples whose state rows
+    (idx .. idx + 1 + ar_steps) come from one source experiment. Val and test keep every sample, so their
+    scores stay comparable across arms."""
+    from neural_lam.weather_dataset import WeatherDataModule
+    from torch.utils.data import Subset
+
+    from hycom_emulator.datastore import kept_windows
+
+    original = WeatherDataModule.setup
+
+    def setup(self, stage=None):
+        original(self, stage)
+        if stage not in ("fit", None) or not getattr(self._datastore, "exclude_source_changes", False):
+            return
+        if self._datastore.is_ensemble or self.num_past_forcing_steps > 2:
+            raise ValueError("exclude_source_changes needs a single-member datastore and num_past_forcing_steps <= 2")
+        train = self.train_dataset
+        keep = kept_windows(train.da_state.time.values, 2 + train.ar_steps, len(train))
+        print(f"exclude_source_changes: dropped {len(train) - keep.size} of {len(train)} train windows", flush=True)
+        self.train_dataset = Subset(train, keep.tolist())
+
+    WeatherDataModule.setup = setup
 
 
 def build_graph(config_path: str, name: str) -> None:
@@ -84,6 +112,7 @@ def main(argv: list[str]) -> None:
     command, rest = argv[1], argv[2:]
     _load_own_checkpoints()
     _fork_workers()
+    _exclude_source_changes()
     if command == "create_graph":
         from neural_lam.create_graph import cli
 
@@ -94,6 +123,10 @@ def main(argv: list[str]) -> None:
     elif command == "train_model":
         from neural_lam.train_model import main as train
 
+        from hycom_emulator import rea_train
+
+        opts, rest = rea_train.split_args(rest)
+        rea_train.install(opts, rest)
         train(rest)
     else:
         raise SystemExit(f"unknown command {command!r}; use create_graph, build_graph or train_model")

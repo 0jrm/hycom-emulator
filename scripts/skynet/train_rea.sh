@@ -4,7 +4,8 @@
 # Each stage loads the previous stage's best checkpoint (weights and epoch; fresh optimizer) and has a hard time cap.
 # Validation unrolls 4 days in every stage, so the stored val losses compare across stages and the scored
 # checkpoint is the lowest over all three. The test split is then scored with neural-lam's own per-lead metrics.
-# Overrides: GPU, BS, HIDDEN, LAYERS, LR, WORKERS, EPOCHS1..3, CAP1..3, TRAIN, VAL, TEST (each "start end"), PY.
+# Overrides: GPU, BS, HIDDEN, LAYERS, LR, WORKERS, EPOCHS1..3, CAP1..3, TRAIN, VAL, TEST (each "start end"), PY;
+# EXTRA_ARGS (space-separated) is appended to every train_model call, e.g. a model or loss of an experiment arm.
 # Run detached: setsid nohup train_rea.sh <run_id> <out_dir> < /dev/null > <out_dir>/train.log 2>&1 &
 set -euo pipefail
 RUN_ID=$1
@@ -19,6 +20,7 @@ export MLFLOW_TRACKING_URI=sqlite:///$OUT/mlflow.db MLFLOW_DISABLE_AGENT_HINT=1 
 MODEL=(--model graph_lam --graph multiscale --hidden_dim ${HIDDEN:-128} --processor_layers ${LAYERS:-4}
        --batch_size ${BS:-8} --lr ${LR:-1e-3} --ar_steps_eval 4 --val_steps_to_log 1 2 4 --val_interval 1
        --n_example_pred 0 --num_workers ${WORKERS:-8} --logger mlflow --runs_root "$OUT/runs")
+read -r -a EXTRA <<<"${EXTRA_ARGS:-}"; MODEL+=("${EXTRA[@]}")
 
 mkdir -p "$OUT" "$SHM"
 trap 'rm -rf "$SHM"' EXIT

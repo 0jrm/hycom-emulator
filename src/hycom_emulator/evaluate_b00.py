@@ -101,6 +101,7 @@ def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int, model:
 
     import hycom_emulator.datastore  # noqa: F401  registers the hycom kind
     import hycom_emulator.convnet  # noqa: F401  registers hycom_graph_lam and hycom_conv_graph_lam
+    import hycom_emulator.rea_loss  # noqa: F401  checkpoints trained with loss rea_wmse name it
 
     config, ds = load_config_and_datastore(config_path=str(config_path))
     data = WeatherDataset(ds, split=split, ar_steps=ar_steps, num_past_forcing_steps=1, num_future_forcing_steps=1)

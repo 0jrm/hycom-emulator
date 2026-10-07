@@ -1,6 +1,6 @@
 import numpy as np
 
-from hycom_emulator.evaluate_rea import accumulate, level_weights, point_weights, summarize
+from hycom_emulator.evaluate_rea import accumulate, in_period, level_weights, point_weights, summarize
 
 LEVELS = np.array([0.0, 10.0, 100.0])
 NAMES = [f"{v}_{d:g}m" for v in ("temp", "salin", "u", "v") for d in LEVELS] + ["ssh", "ubaro", "vbaro"]
@@ -58,3 +58,12 @@ def test_scores_match_a_direct_weighted_computation():
     e_col = np.concatenate([np.concatenate([p[0, :, k] - t[0, :, k] for _, t, p in samples]) for k in js])
     w_col = np.concatenate([np.concatenate([w[:, k] * dz[i]] * 3) for i, k in enumerate(js)])
     assert np.isclose(s["u"]["1"]["rmse_model"], np.sqrt(np.sum(w_col * e_col**2) / w_col.sum()))
+
+
+def test_in_period_needs_the_initial_and_every_target_day_inside():
+    days = lambda first, n: (np.datetime64(first) + np.arange(n) * np.timedelta64(1, "D")).astype("datetime64[ns]").astype(np.int64)  # noqa: E731
+    p = ("2024-04-02", "2024-08-31")
+    assert in_period(days("2024-04-04", 4), p)
+    assert not in_period(days("2024-04-03", 4), p), "initial day 2024-04-01 is outside"
+    assert in_period(days("2024-08-28", 4), p) and not in_period(days("2024-08-29", 4), p)
+    assert in_period(days("2020-01-01", 4), None)
