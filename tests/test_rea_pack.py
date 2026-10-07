@@ -16,7 +16,7 @@ from hycom_emulator.rea_pack import Plan, build, gulf_mask
 
 NC_FILL = np.float32(1.267651e30)
 AXIS = np.array([0.0, 10.0, 50.0, 100.0, 200.0])
-DEPTHS = (0.0, 10.0, 100.0, 200.0)  # 50 m left out: below-bottom fill must skip to the selected 10 m
+DEPTHS = (0.0, 10.0, 100.0, 200.0)  # 50 m left out: level_index must skip it
 NY, NX = 12, 14
 LON = -92 + 0.5 * np.arange(NX)
 LAT = 20 + 0.5 * np.arange(NY) + 0.01 * np.arange(NY) ** 2  # uneven, like Mercator
@@ -149,23 +149,30 @@ def test_layout(pack):
     np.testing.assert_array_equal(static, _bottom())
 
 
-def test_fill(pack):
+def test_points_that_are_not_real_hold_the_start_day_mean(pack):
     out, source = pack
     state, forcing = _arrays(out)
-    names = _meta(out).state_feature.values.tolist()
+    meta = _meta(out)
+    names = meta.state_feature.values.tolist()
     assert np.isfinite(state).all() and np.isfinite(forcing).all()
     assert np.abs(state).max() < 1e3 and np.abs(forcing).max() < 1e4
     grid = lambda a: a.reshape(a.shape[0], NX, NY, -1).transpose(0, 2, 1, 3)  # (time, y, x, feature)
     s = grid(state)
-    land = _bottom() == 0
-    assert (s[:, land] == 0).all()
-    shelf_j, shelf_i = 7, 11
     src = source[DAYS[0]]
-    for v, nc in (("temp", "water_temp"), ("u", "u")):
-        assert s[0, shelf_j, shelf_i, names.index(f"{v}_100m")] == src[nc][1, shelf_j, shelf_i]  # 10 m, not 50 m
-        assert s[0, shelf_j, shelf_i, names.index(f"{v}_200m")] == src[nc][1, shelf_j, shelf_i]
+    bottom = _bottom()
+    for v, nc in (("temp", "water_temp"), ("u", "u"), ("ssh", "ssh")):
+        for depth in (DEPTHS if v != "ssh" else (None,)):
+            name, real = (v, bottom > 0) if depth is None else (f"{v}_{depth:g}m", bottom > depth)
+            k = list(AXIS).index(depth) if depth is not None else None
+            field = src[nc] if k is None else src[nc][k]
+            fill = np.float32(field[real].mean(dtype=np.float64))
+            c = names.index(name)
+            assert (s[:, ~real, c] == pytest.approx(fill, rel=1e-6)), name
+            assert (s[:, real, c] != fill).all(), name
+    shelf_j, shelf_i = 7, 11
+    assert s[0, shelf_j, shelf_i, names.index("temp_10m")] == src["water_temp"][1, shelf_j, shelf_i]
     slope_j, slope_i = 3, 12
-    assert s[0, slope_j, slope_i, names.index("temp_200m")] == src["water_temp"][3, slope_j, slope_i]
+    assert s[0, slope_j, slope_i, names.index("temp_100m")] == src["water_temp"][3, slope_j, slope_i]
     assert grid(forcing)[1, 4, 6, 0] == 0  # the NaN wind
 
 
@@ -255,8 +262,6 @@ def test_statistics_match_numpy(pack):
         assert float(meta.state_std[c]) == pytest.approx(x.std(), rel=1e-5), name
         assert float(meta.state_diff_mean[c]) == pytest.approx(d.mean(), rel=1e-4, abs=1e-6), name
         assert float(meta.state_diff_std[c]) == pytest.approx(max(d.std(), DIFF_STD_FLOOR * x.std()), rel=1e-5), name
-    c = names.index("temp_200m")
-    assert float(meta.state_mean[c]) != pytest.approx(state[use][:, ocean, c].mean(), rel=1e-3)  # fill excluded
     f = forcing[use][:, ocean].astype(np.float64)
     np.testing.assert_allclose(meta.forcing_mean, f.mean((0, 1)), rtol=1e-5, atol=1e-6)
     np.testing.assert_allclose(meta.forcing_std, np.where(f.std((0, 1)) > 0, f.std((0, 1)), 1), rtol=1e-5)

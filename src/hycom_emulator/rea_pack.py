@@ -9,8 +9,9 @@ The source is one pair of netCDF-4 files per day under <root>/YYYY/: gomb4_daily
 (u, v, w_velocity, water_temp, salinity on 40 z levels) and gomb4_daily_YYYY_DDD_2d.nc (ssh,
 barotropic velocity, mixed layer, 10 m wind). Row n holds day n's daily mean, stamped at its 12 h centre.
 State is T, S, u, v on the selected z levels, then ssh and barotropic velocity; forcing is that
-day's mean wind and three calendar channels. A level below the bottom repeats the deepest valid level
-above it, land is 0, and level_ocean marks where each level is real. The statistics use real points
+day's mean wind and three calendar channels. Below the bottom and on land each state channel holds one
+constant, its mean over real points on the start day, so those points standardize near 0 and never
+change; level_ocean marks where each level is real. The statistics use real points
 of real train rows only. A day whose files are missing is interpolated in time and flagged in
 time_filled; a gap longer than --max-gap refuses the plan.
 
@@ -138,6 +139,7 @@ class Grid:
     level_ocean: np.ndarray  # (nlev, ny, nx) bool
     static: np.ndarray  # (static_feature, ny, nx) float32, STATIC_UNITS order
     boundary: np.ndarray  # (ny, nx) bool
+    fill: np.ndarray  # (state_feature,) float32, the value of every point that is not real
 
     def save(self, path: Path) -> None:
         tmp = path.with_name(path.name + ".partial")
@@ -270,7 +272,10 @@ def make_grid(plan: Plan) -> Grid:
     if bad:
         raise ValueError(f"depths not in the file's Depth axis: {bad}")
     level_index = np.array([int(np.argmin(np.abs(axis - d))) for d in plan.depths])
-    levels, _, _ = read_day(plan.root, np.datetime64(plan.start), level_index, plan.stride)
+    levels, surface, _ = read_day(plan.root, np.datetime64(plan.start), level_index, plan.stride)
+    level_ocean = level_validity(levels)
+    fill = [levels[i, k][level_ocean[k]].mean() for i in range(len(LEVEL_VARS)) for k in range(len(plan.depths))]
+    fill += [a[_valid(a)].mean() for a in surface]
 
     lon2d, lat2d = np.meshgrid(lon, lat)
     native = {
@@ -287,9 +292,10 @@ def make_grid(plan: Plan) -> Grid:
         lon=lon[s[1]],
         lat=lat[s[0]],
         ocean=ocean[s],
-        level_ocean=level_validity(levels),
+        level_ocean=level_ocean,
         static=np.stack([native[k][s] for k in STATIC_UNITS]).astype(np.float32),
         boundary=boundary_mask(ocean, plan.band)[s],
+        fill=np.array(fill, np.float32),
     )
 
 
@@ -308,18 +314,14 @@ def calendar(day: np.datetime64, lat: np.ndarray, nx: int) -> np.ndarray:
     return np.stack([np.full(shape, np.sin(phase)), np.full(shape, np.cos(phase)), np.broadcast_to(q[:, None], shape)])
 
 
-def assemble(raw, day: np.datetime64, layout: Layout, grid: Grid) -> tuple[np.ndarray, np.ndarray]:
+def assemble(raw, day: np.datetime64, grid: Grid) -> tuple[np.ndarray, np.ndarray]:
     """One row as (grid_index, state_feature) and (grid_index, forcing_feature), no fill values left."""
     levels, surface, wind = raw
     if not np.array_equal(level_validity(levels), grid.level_ocean):
         raise ValueError(f"{day}: the level validity differs from the first day's; a bad file?")
-    filled = np.empty_like(levels)
-    last = np.zeros_like(levels[:, 0])
-    for k in range(layout.nlev):
-        last = np.where(grid.level_ocean[k], levels[:, k], last)
-        filled[:, k] = last
-    filled = np.where(grid.ocean, filled, 0.0)
-    state = np.concatenate([filled.reshape(-1, *grid.ocean.shape), np.where(_valid(surface), surface, 0.0)])
+    state = np.concatenate([levels.reshape(-1, *grid.ocean.shape), surface])
+    real = np.concatenate([np.tile(grid.level_ocean, (len(LEVEL_VARS), 1, 1)), _valid(surface)])
+    state = np.where(real, state, grid.fill[:, None, None])
     forcing = np.concatenate([np.where(_valid(wind), wind, 0.0), calendar(day, grid.lat, grid.lon.size)])
     return _to_grid_index(state).astype(np.float32), _to_grid_index(forcing).astype(np.float32)
 
@@ -338,7 +340,7 @@ def _init_worker(plan: Plan, grid: Grid, days: np.ndarray, out: Path) -> None:
 def _write_row(n: int) -> tuple[int, float]:
     t0 = time.perf_counter()
     plan, grid, day, arrays = _WORKER["plan"], _WORKER["grid"], _WORKER["days"][n], _WORKER["arrays"]
-    st, fo = assemble(read_day(plan.root, day, grid.level_index, plan.stride), day, plan.layout, grid)
+    st, fo = assemble(read_day(plan.root, day, grid.level_index, plan.stride), day, grid)
     arrays["state"][n], arrays["forcing"][n] = st, fo
     for a in arrays.values():
         a.flush()
