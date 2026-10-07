@@ -3,6 +3,8 @@
     python -m hycom_emulator.nlam create_graph --config_path nlam.yaml --name multiscale
     python -m hycom_emulator.nlam build_graph nlam.yaml mesh3
     python -m hycom_emulator.nlam train_model --config_path nlam.yaml --model graph_lam ...
+
+train_model also takes the arm flags of hycom_emulator.rea_train.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ import sys
 
 import hycom_emulator.datastore  # noqa: F401  registers DATASTORES["hycom"]
 import hycom_emulator.convnet  # noqa: F401  registers the conv models and, via physics, hycom_graph_lam and hycom_wmse
+import hycom_emulator.rea_loss  # noqa: F401  registers rea_wmse
 
 
 def _load_own_checkpoints() -> None:
@@ -120,6 +123,10 @@ def main(argv: list[str]) -> None:
     elif command == "train_model":
         from neural_lam.train_model import main as train
 
+        from hycom_emulator import rea_train
+
+        opts, rest = rea_train.split_args(rest)
+        rea_train.install(opts, rest)
         train(rest)
     else:
         raise SystemExit(f"unknown command {command!r}; use create_graph, build_graph or train_model")
