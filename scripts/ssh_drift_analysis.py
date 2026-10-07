@@ -100,6 +100,28 @@ def projected(d: Path) -> None:
         print(f"{path.stem:9s} {out}")
 
 
+def loss_domain(d: Path, config: Path) -> None:
+    """Per channel, lead-1 mean error in change stds: over the points the loss counts (fill included) and over real ones.
+    With a free output bias per channel, a converged MSE fit drives the first to zero on train data, not the second."""
+    meta = xr.open_zarr(pack_path(config) / "meta.zarr", consolidated=True).load()
+    names = [str(n) for n in meta.state_feature.values]
+    pick = ["ssh", "ubaro", "vbaro"] + [f"{v}_{z}m" for v in ("v", "u", "temp") for z in (0, 100, 500, 1000, 2000)]
+    print("== lead-1 mean error / change std: loss domain | real points (fill share of the loss domain)")
+    inside = ~meta.boundary_mask.values.astype(bool)
+    lev = list(meta.level.values.astype(float))
+    for path in sorted(d.glob("s[0-9]_*.npz")):
+        f = np.load(path)
+        if "loss_domain_bias" not in f:
+            continue
+        row = []
+        for n in pick:
+            j = names.index(n)
+            var, _, z = n.rpartition("_")
+            fill = 1 - meta.level_ocean.values[inside, lev.index(float(z[:-1]))].mean() if var else 0.0
+            row.append(f"{n} {f['loss_domain_bias'][0, j]:+.4f}|{f['real_point_bias'][0, j]:+.4f} ({fill:.2f})")
+        print(f"{path.stem:9s} " + "; ".join(row))
+
+
 def by_band_distance(d: Path, config: Path) -> None:
     meta = xr.open_zarr(pack_path(config) / "meta.zarr", consolidated=True).load()
     nx, ny = np.unique(meta.x.values).size, np.unique(meta.y.values).size
@@ -125,4 +147,5 @@ if __name__ == "__main__":
         truth_months(d)
         against_anomaly(d)
         projected(d)
+    loss_domain(d, cfg)
     by_band_distance(d, cfg)

@@ -15,7 +15,9 @@ of each level on points real at that level (`level_ocean`). Regions: gulf and in
 boundary band). Since each quantity is linear, the error of the quantity is the quantity of the error.
 
 `forecast` runs the model on a split and writes <out_prefix>.npz (per forecast: x0, truth and prediction of every
-quantity, the SSH error's area-mean offset and pattern RMSE, the mean SSH error map) and <out_prefix>.json (per
+quantity, the SSH error's area-mean offset and pattern RMSE; over all forecasts: the mean SSH error map, and per
+channel the mean error in units of its change std over the points neural-lam's loss counts (every point outside
+the boundary mask, below-floor fill included, unweighted) and over the real ones only) and <out_prefix>.json (per
 region, quantity and lead: mean and std of the error over forecasts, the share of forecasts with a positive error,
 and the mean one-step change of truth and model). `series` computes every quantity on every truth row of the pack,
 reading rows with pread so neither the page cache nor this process's RSS keeps them.
@@ -31,7 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
-from hycom_emulator.evaluate_rea import LEVEL_VARS, cell_area, level_weights, pack_path, regions
+from hycom_emulator.evaluate_rea import cell_area, level_weights, pack_path, point_weights, regions
 
 RHO0 = 1025.0  # kg/m3
 CP = 3990.0  # J/(kg K), HYCOM's spcifh
@@ -126,7 +128,12 @@ def forecasts(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | 
         "ssh_pattern": np.zeros((n, nr, ar_steps)),
         "ssh_error_map": np.zeros((ar_steps, area.size)),
         "t0": np.zeros(n, "datetime64[ns]"),
+        "loss_domain_bias": np.zeros((ar_steps, len(names))),
+        "real_point_bias": np.zeros((ar_steps, len(names))),
     }
+    loss_domain = ~meta.boundary_mask.values.astype(bool)
+    real = point_weights(names, np.ones(area.size), loss_domain, meta.level_ocean.values.astype(bool), meta.level.values.astype(float))
+    diff_std = meta.state_diff_std.values
     for i, k in enumerate(idx):
         sample = data[k]
         x0, truth = sample[0][-1].numpy(), sample[1].numpy()
@@ -135,6 +142,9 @@ def forecasts(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | 
         states_t, states_p = np.concatenate([x0[None], truth]), np.concatenate([x0[None], pred])
         e = pred[..., ssh] - truth[..., ssh]
         out["ssh_error_map"] += e / n
+        err = (pred - truth) / diff_std
+        out["loss_domain_bias"] += err[:, loss_domain].mean(1) / n
+        out["real_point_bias"] += np.einsum("lgf,gf->lf", err, real) / real.sum(0) / n
         for r, (name, mask) in enumerate(masks.items()):
             out["true"][i, r], out["pred"][i, r] = apply(fs[name], states_t), apply(fs[name], states_p)
             out["ssh_offset"][i, r], out["ssh_pattern"][i, r] = offset_pattern(e, area * mask)
