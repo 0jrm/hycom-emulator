@@ -20,6 +20,8 @@ from scipy import ndimage
 
 from hycom_emulator.evaluate_rea import cell_area, pack_path, regions
 
+# Source experiment of the 3z (T, S, u, v) rows by start date, docs/rea-pipeline.md; 2d (SSH) differs in Jan 2024.
+EXPERIMENTS = (("020", "2001-01-01"), ("031", "2017-06-02"), ("035", "2021-01-01"), ("037", "2024-01-02"), ("038", "2024-04-02"))
 QUANTITIES = ("ssh_mean", "ubaro_mean", "vbaro_mean", "temp_mean", "salin_mean", "u_mean", "v_mean", "heat_content", "salt_content")
 
 
@@ -118,6 +120,9 @@ def against_anomaly(d: Path) -> None:
             e1 = f["pred"][:, rr, 1, j] - f["true"][:, rr, 1, j]
             by = " ".join(f"{m}:{scale * e1[month == m].mean():+.2f}" for m in np.unique(month))
             print(f"{path.stem:9s} lead-1 {name} error by start month ({unit}): {by}")
+            exp = np.searchsorted(np.array([np.datetime64(e[1]) for e in EXPERIMENTS]), f["t0"].astype("datetime64[D]"), side="right") - 1
+            by = " ".join(f"{EXPERIMENTS[x][0]}:{scale * e1[exp == x].mean():+.2f} (n {np.sum(exp == x)})" for x in np.unique(exp))
+            print(f"{path.stem:9s} lead-1 {name} error by experiment ({unit}): {by}")
         days = z["time"].astype("datetime64[D]")
         res0 = res[np.searchsorted(days, f["t0"].astype("datetime64[D]"))]
         model_step = f["pred"][:, rr, 1, qq] - f["true"][:, rr, 0, qq]
