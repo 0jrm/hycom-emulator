@@ -16,6 +16,7 @@ set -euo pipefail
 RUN_ID=$1
 OUT=$2
 PY=${PY:-/conda/jmiranda/venvs/hycom-emulator/bin/python}
+export PYTHONPATH=$(cd "$(dirname "$0")/../.." && pwd)/src${PYTHONPATH:+:$PYTHONPATH}  # this checkout, not the venv's editable install
 SHM=/dev/shm/$USER/$RUN_ID
 read -r TR0 TR1 <<<"${TRAIN:-2001-01-16 2021-12-31}"
 read -r VA0 VA1 <<<"${VAL:-2022-01-01 2023-12-31}"

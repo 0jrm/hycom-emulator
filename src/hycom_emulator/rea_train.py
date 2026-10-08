@@ -132,6 +132,11 @@ def install(opts: Options, rest: list[str]) -> None:
         on.append(f"ReaForecaster pushforward {opts.pushforward} train_first_step {opts.train_first_step} "
                   f"input_noise {opts.input_noise:g} checkpoint_steps {opts.checkpoint_steps}")
     if opts.compile:
+        import torch._inductor.config as inductor
+
+        # A step recomputed by activation checkpointing (ReaForecaster) runs eagerly and lays tensors out unpadded,
+        # while the compiled backward expects inductor's padded strides (assertion on the 107054-edge g2m tensor).
+        inductor.comprehensive_padding = False
         build = tm.build_predictor
 
         def compiled(*args, **kwargs):
