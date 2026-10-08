@@ -11,7 +11,8 @@
 - --train_first_step: with --pushforward K, step 1 keeps its gradient and steps 2..K+1 run without one, so the
   one-day forecast from a true state stays trained.
 - --checkpoint_steps: recompute each step's activations in the backward pass (memory for time).
-- --compile: torch.compile each step predictor in place (state dict keys unchanged).
+- --compile: torch.compile each step predictor in place (state dict keys unchanged). Steps recomputed by
+  --checkpoint_steps run eagerly.
 - --nondeterministic: build the Trainer with deterministic=False (neural-lam hard-codes True; GraphLAM's scatter
   sums are not deterministic on GPU either way, and the deterministic kernels cost 5-25% per step).
 - --plateau DECAY STOP: after DECAY validations without a relative gain of --plateau_threshold (default 0.005) in
@@ -132,11 +133,6 @@ def install(opts: Options, rest: list[str]) -> None:
         on.append(f"ReaForecaster pushforward {opts.pushforward} train_first_step {opts.train_first_step} "
                   f"input_noise {opts.input_noise:g} checkpoint_steps {opts.checkpoint_steps}")
     if opts.compile:
-        import torch._inductor.config as inductor
-
-        # A step recomputed by activation checkpointing (ReaForecaster) runs eagerly and lays tensors out unpadded,
-        # while the compiled backward expects inductor's padded strides (assertion on the 107054-edge g2m tensor).
-        inductor.comprehensive_padding = False
         build = tm.build_predictor
 
         def compiled(*args, **kwargs):
@@ -252,7 +248,9 @@ class ReaForecaster(ARForecaster):
             with nullcontext() if grad else torch.no_grad():
                 args = (prev_state, prev_prev_state, forcing_features[:, i])
                 if grad and self.checkpoint_steps:
-                    pred_state, pred_std = checkpoint(self.predictor, *args, use_reentrant=False)
+                    # .forward, not the module call: with --compile both the forward and its recomputation run
+                    # eagerly, since a compiled forward and an eager recomputation disagree on tensor layout.
+                    pred_state, pred_std = checkpoint(self.predictor.forward, *args, use_reentrant=False)
                 else:
                     pred_state, pred_std = self.predictor(*args)
                 new_state = self.boundary_mask * boundary_states[:, i] + self.interior_mask * pred_state
