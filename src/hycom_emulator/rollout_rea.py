@@ -16,7 +16,7 @@ sample), each run for --horizon days or up to the end of the record. `run` write
 batch of starts, skips starts already in parts on a rerun, and concatenates the parts into out/stats.nc with dims
 (start, lead). STATS below is the single list of its variables. `check` measures how much chunking changes the raw
 predictions against the run-to-run noise of a repeat. `figures` plots stats.nc; `movie` reruns a few starts and
-animates SSH and T at 100 m.
+animates model, truth and their difference for --channels (default SSH and T at 100 m).
 """
 
 from __future__ import annotations
@@ -565,7 +565,21 @@ def figures(stats: Path, out: Path) -> None:
             plt.close(fig)
 
 
-def movie(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, chunk: int, note: str = "") -> None:
+def movie_channel(name: str, names: list[str]) -> list[int]:
+    """State columns behind a movie channel: a state feature, or speed_<depth>m as the magnitude of u and v there."""
+    if name.startswith("speed_"):
+        depth = name.removeprefix("speed_")
+        return [names.index(f"u_{depth}"), names.index(f"v_{depth}")]
+    return [names.index(name)]
+
+
+def movie_values(x: np.ndarray, groups: list[list[int]]) -> np.ndarray:
+    """(..., channel) movie values from (..., feature) states: one column as is, two (u, v) as their magnitude."""
+    return np.stack([x[..., g[0]] if len(g) == 1 else np.hypot(x[..., g[0]], x[..., g[1]]) for g in groups], axis=-1)
+
+
+def movie(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, chunk: int, note: str = "",
+          chans: tuple[str, ...] = ("ssh", "temp_100m")) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -575,23 +589,22 @@ def movie(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, 
     m = load_model(config, ckpt)
     out.mkdir(parents=True, exist_ok=True)
     todo = start_set(m.times.astype("datetime64[D]"), horizon, starts)
-    names, chans = m.geo.names, ("ssh", "temp_100m")
-    cols = [names.index(c) for c in chans]
-    keep = [{k: np.full((s.horizon, 2, len(m.geo.region)), np.nan, np.float32) for k in ("model", "truth")} for s in todo]
+    groups = [movie_channel(c, m.geo.names) for c in chans]
+    keep = [{k: np.full((s.horizon, len(chans), len(m.geo.region)), np.nan, np.float32) for k in ("model", "truth")} for s in todo]
     for lead, pos, step in unroll(m.module, m.window, m.times, todo, chunk):
-        model, truth = step.pred[..., cols].cpu().numpy(), step.truth[..., cols].cpu().numpy()
+        model, truth = (movie_values(x.cpu().numpy(), groups) for x in (step.pred, step.truth))
         for i, b in enumerate(pos):
             keep[b]["model"][lead - 1], keep[b]["truth"][lead - 1] = model[i].T, truth[i].T
     static = m.meta.static.load()
     grid = lambda v: v.reshape(m.shape).T  # noqa: E731
     lon, lat = grid(static.sel(static_feature="lon").values), grid(static.sel(static_feature="lat").values)
     region = m.geo.region.cpu().numpy()
-    k100 = int(np.argmin(np.abs(m.meta.level.values - 100)))
-    masks = [region, region & m.meta.level_ocean.values[:, k100].astype(bool)]
+    level_of = lambda c: int(np.argmin(np.abs(m.meta.level.values - float(c.rsplit("_", 1)[1][:-1]))))  # noqa: E731
+    masks = [region if c in ("ssh", "ubaro", "vbaro") else region & m.meta.level_ocean.values[:, level_of(c)].astype(bool) for c in chans]
     use_ffmpeg = shutil.which("ffmpeg") is not None
     for s, arr in zip(todo, keep):
         mod, tru = (np.where(np.array(masks)[None], arr[k], np.nan) for k in ("model", "truth"))
-        fig, axes = plt.subplots(2, 3, figsize=(13, 7), sharex=True, sharey=True)
+        fig, axes = plt.subplots(len(chans), 3, figsize=(13, 3.5 * len(chans)), sharex=True, sharey=True, squeeze=False)
         meshes = []
         for r, ch in enumerate(chans):
             lo, hi = np.nanpercentile(tru[:, r], [2, 98])
@@ -606,7 +619,7 @@ def movie(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, 
         title = fig.suptitle("", fontsize=8)
 
         def frame(l):
-            for r in range(2):
+            for r in range(len(chans)):
                 for c, v in enumerate((mod[l, r], tru[l, r], mod[l, r] - tru[l, r])):
                     meshes[3 * r + c].set_array(grid(v))
             title.set_text(f"{note + chr(10) if note else ''}start {s.date}  valid {s.date + (l + 1) * DAY}  lead {l + 1} d\n{LABEL}")
@@ -643,6 +656,8 @@ def main() -> None:
             q.add_argument("--limit", type=int, default=None, help="first n starts after ordering (smoke)")
         if cmd == "movie":
             q.add_argument("--note", default="", help="first title line of every frame, e.g. which checkpoint")
+            q.add_argument("--channels", type=lambda s: tuple(s.split(",")), default=("ssh", "temp_100m"),
+                           help="state features, or speed_<depth>m for the magnitude of u and v there")
     q = sub.add_parser("figures")
     q.add_argument("stats", type=Path)
     q.add_argument("out", type=Path)
@@ -652,7 +667,7 @@ def main() -> None:
     elif a.cmd == "check":
         print(json.dumps(check(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk)["groups"], indent=1))
     elif a.cmd == "movie":
-        movie(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk, a.note)
+        movie(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk, a.note, a.channels)
     else:
         figures(a.stats, a.out)
 
