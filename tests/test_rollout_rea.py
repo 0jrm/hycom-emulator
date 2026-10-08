@@ -290,3 +290,13 @@ def test_loads_ensemble_checkpoints():
     from neural_lam.models import MODELS
 
     assert "crps_graph_lam" in MODELS
+
+
+def test_movie_channels_resolve_features_and_speed():
+    from hycom_emulator.rollout_rea import movie_channel, movie_values
+
+    names = ["temp_0m", "u_0m", "v_0m", "ssh"]
+    groups = [movie_channel(c, names) for c in ("ssh", "speed_0m", "temp_0m")]
+    assert groups == [[3], [1, 2], [0]]
+    x = np.array([[20.0, 3.0, 4.0, 0.5]])
+    np.testing.assert_allclose(movie_values(x, groups), [[0.5, 5.0, 20.0]])
