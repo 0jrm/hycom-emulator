@@ -8,6 +8,7 @@
 # last stage's best. PF_<days> is the stage's --pushforward (default 4 from 8 days on, else 0; FIRST=1 adds
 # --train_first_step), CKPT_<days>=1 its --checkpoint_steps (default from 16 days on). The test split is then scored
 # over the last stage's validation horizon with neural-lam's own per-lead metrics.
+# EXCLUDE_SOURCE_CHANGES=1 drops train windows that straddle a change of reanalysis experiment.
 # Overrides: GPU, BS, HIDDEN, LAYERS, LR, WORKERS, PRECISION, STAGES, EPOCHS_/CAP_/EVAL_/PF_/CKPT_<days>, FIRST,
 # TRAIN, VAL, TEST (each "start end"), PY; EXTRA_ARGS (space-separated) is appended to every train_model call, e.g. a
 # model or loss of an experiment arm, --compile --nondeterministic --plateau 2 3.
@@ -34,6 +35,7 @@ if [ "${STAGE:-1}" = 1 ]; then echo "== $(date -Is) stage data to $SHM"; rsync -
 else echo "== $(date -Is) reading $DATA in place (STAGE=0)"; ZARR=$DATA; fi
 cat > "$OUT/rea.yaml" <<YAML
 zarr: $ZARR
+exclude_source_changes: $([ "${EXCLUDE_SOURCE_CHANGES:-0}" = 1 ] && echo true || echo false)
 splits:
   train: [$TR0, $TR1]
   val: [$VA0, $VA1]
