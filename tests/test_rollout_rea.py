@@ -284,3 +284,9 @@ def test_parts_are_skipped_on_rerun_and_concatenated_in_order(tmp_path):
     assert np.isfinite(r[0, :3]).all() and np.isnan(r[0, 3:]).all() and np.isnan(r[2, 5:]).all() and np.isfinite(r[1]).all()
     assert ds.valid.values[2, 6] == np.datetime64("2022-03-08")
     assert ds.rmse_temp.attrs["units"] == "degC" and ds.attrs["label"] == "x"
+
+
+def test_loads_ensemble_checkpoints():
+    from neural_lam.models import MODELS
+
+    assert "crps_graph_lam" in MODELS

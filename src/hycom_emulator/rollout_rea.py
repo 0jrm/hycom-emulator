@@ -40,6 +40,7 @@ import torch
 import xarray as xr
 from scipy import ndimage
 
+import hycom_emulator.ensemble  # noqa: F401  registers crps_graph_lam, so a free run can load an ensemble checkpoint
 from hycom_emulator.evaluate_rea import LEVEL_VARS, level_weights, point_weights
 
 LABEL = ("regional free run: true boundary band (neural-lam overwrites it with truth every step) and true daily wind; "
