@@ -1,4 +1,4 @@
-"""gauss: the weighted Gaussian CRPS, the head's init from a deterministic checkpoint and the routing. Synthetic pack."""
+"""gauss: the weighted Gaussian CRPS, the head's init from a deterministic checkpoint, std feedback and the routing. Synthetic pack."""
 
 import math
 
@@ -11,8 +11,9 @@ from neural_lam.models import ARForecaster, ForecasterModule
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 from test_ensemble import HIDDEN, ds, rollout_batch  # noqa: F401  ds is a fixture
 
-from hycom_emulator import nlam
-from hycom_emulator.gauss import INIT_STD, GaussForecasterModule, module_factory, split_args, wcrps_gauss
+from hycom_emulator import gauss, nlam
+from hycom_emulator.gauss import INIT_STD, GaussForecasterModule, StdFeedbackGraphLAM, module_factory, split_args, wcrps_gauss
+from hycom_emulator.rea_train import ReaForecaster
 
 
 def predictor(cls, datastore, seed=0, output_std=True):
@@ -99,14 +100,75 @@ def test_the_module_weighs_by_the_change_std_and_refuses_other_set_ups(ds, tmp_p
                          loss="wcrps_gauss")._compute_prediction_and_loss(batch)
 
 
+def test_std_feedback_starts_at_zero_and_keeps_the_deterministic_mean_at_every_step(ds, tmp_path, monkeypatch):
+    parent, module = gauss_module(ds, tmp_path, cls=StdFeedbackGraphLAM, forecaster=ReaForecaster)
+    init, target, forcing, _ = rollout_batch(ds[1], steps=4)
+    seen = []
+    forward = StdFeedbackGraphLAM.forward
+    monkeypatch.setattr(StdFeedbackGraphLAM, "forward", lambda self, *a: seen.append(a[3]) or forward(self, *a))
+    mean, sigma = module.forecaster.eval()(init, forcing, target)
+    det, _ = parent.forecaster(init, forcing, target)
+    assert len(seen) == 4 and torch.equal(seen[0], torch.zeros_like(seen[0])), "step 1 starts from true states"
+    assert torch.allclose(mean, det, rtol=0, atol=1e-5), "zero sigma-input columns leave the mean at every step"
+    band = ~module.interior_mask_bool
+    assert torch.equal(seen[1][:, band], torch.zeros_like(seen[1][:, band])) and torch.equal(seen[1][:, ~band], sigma[:, 0][:, ~band])
+
+
+def test_std_feedback_carries_sigma_to_the_next_step(ds, tmp_path):
+    _, module = gauss_module(ds, tmp_path, cls=StdFeedbackGraphLAM, forecaster=ReaForecaster)
+    fc = module.forecaster.eval()
+    with torch.no_grad():
+        torch.nn.init.normal_(fc.predictor.grid_embedder[0].weight, std=0.3)
+        torch.nn.init.normal_(fc.predictor.output_map[-1].weight, std=0.3)
+    init, target, forcing, _ = rollout_batch(ds[1], steps=2)
+    with torch.no_grad():
+        mean, sigma = fc(init, forcing, target)
+        step2 = (mean[:, 0], init[:, 1], forcing[:, 1])
+        carried = fc.predictor(*step2, fc.interior_mask * sigma[:, 0])[1]
+        without = fc.predictor(*step2, torch.zeros_like(sigma[:, 0]))[1]
+    assert torch.allclose(carried, sigma[:, 1]), "step 2 reads step 1's sigma"
+    assert (carried - without).abs().max() > 1e-3, "sigma_2 depends on sigma_1"
+
+
+def test_std_feedback_trains_through_pushforward_and_checkpointed_steps(ds, tmp_path):
+    _, module = gauss_module(ds, tmp_path, cls=StdFeedbackGraphLAM, forecaster=ReaForecaster)
+    fc = module.forecaster
+    with torch.no_grad():
+        torch.nn.init.normal_(fc.predictor.grid_embedder[0].weight, std=0.3)
+        torch.nn.init.normal_(fc.predictor.output_map[-1].weight, std=0.3)
+    init, target, forcing, _ = rollout_batch(ds[1], steps=3)
+    with torch.no_grad():
+        ref = fc.eval()(init, forcing, target)
+    fc.train()
+    fc.pushforward, fc.checkpoint_steps = 1, True
+    mean, sigma = fc(init, forcing, target)
+    assert torch.allclose(mean, ref[0], atol=1e-6) and torch.allclose(sigma, ref[1], atol=1e-6)
+    weight = fc.predictor.grid_embedder[0].weight
+    (first,) = torch.autograd.grad(sigma[:, 0].sum(), weight, retain_graph=True)
+    assert not first.any(), "the pushforward step runs without gradient"
+    (third,) = torch.autograd.grad(sigma[:, 2].sum(), weight)
+    assert third.abs().sum() > 0
+
+
+def test_init_from_zero_pads_the_sigma_input_columns(ds, tmp_path):
+    parent, module = gauss_module(ds, tmp_path, cls=StdFeedbackGraphLAM, forecaster=ReaForecaster)
+    old = parent.forecaster.predictor.grid_embedder[0].weight
+    new = module.forecaster.predictor.grid_embedder[0].weight
+    f, static = ds[1].get_num_data_vars("state"), module.forecaster.predictor.grid_static_features.shape[1]
+    at = old.shape[1] - static
+    assert new.shape == (old.shape[0], old.shape[1] + f)
+    assert torch.equal(new[:, :at], old[:, :at]) and torch.equal(new[:, at + f:], old[:, at:]) and not new[:, at:at + f].any()
+
+
 def test_split_args():
     init_from, rest = split_args(["--config_path", "n.yaml", "--model", "graph_lam", "--output_std", "--loss", "wcrps_gauss", "--init_from", "a.ckpt"])
     assert init_from == "a.ckpt" and rest == ["--config_path", "n.yaml", "--output_std", "--loss", "wcrps_gauss", "--model", "graph_lam"]
+    assert split_args(["--output_std", "--std_feedback"]) == (None, ["--output_std", "--model", gauss.FEEDBACK_MODEL])
 
 
 @pytest.mark.parametrize("argv, match", [
     (["--loss", "wcrps_gauss"], "--output_std"),
-    (["--loss", "wcrps_gauss", "--init_from", "a.ckpt"], "--output_std"),
+    (["--loss", "wcrps_gauss", "--std_feedback", "--init_from", "a.ckpt"], "--output_std"),
     (["--loss", "wcrps_gauss", "--output_std", "--model", "hi_lam"], "graph_lam"),
     (["--loss", "wcrps_gauss", "--output_std", "--log_domain_means"], "log_domain_means"),
 ])
@@ -119,11 +181,11 @@ def test_routing_refuses_an_inconsistent_set(argv, match, monkeypatch, capsys):
     assert match in str(e.value) + capsys.readouterr().err
 
 
-def test_routing_installs_the_module(monkeypatch):
+def test_routing_installs_the_module_and_the_carrying_forecaster(monkeypatch):
     calls = []
     monkeypatch.setattr(tm, "main", calls.append)
     monkeypatch.setattr(tm, "ForecasterModule", tm.ForecasterModule)
     monkeypatch.setattr(tm, "ARForecaster", tm.ARForecaster)
-    nlam.main(["nlam", "train_model", "--model", "graph_lam", "--output_std", "--loss", "wcrps_gauss", "--init_from", "a.ckpt"])
-    assert calls == [["--output_std", "--loss", "wcrps_gauss", "--model", "graph_lam"]]
-    assert tm.ForecasterModule.__qualname__ == "module_factory.<locals>.build"
+    nlam.main(["nlam", "train_model", "--model", "graph_lam", "--output_std", "--loss", "wcrps_gauss", "--std_feedback", "--init_from", "a.ckpt"])
+    assert calls == [["--output_std", "--loss", "wcrps_gauss", "--model", gauss.FEEDBACK_MODEL]]
+    assert tm.ForecasterModule.__qualname__ == "module_factory.<locals>.build" and tm.ARForecaster is ReaForecaster
