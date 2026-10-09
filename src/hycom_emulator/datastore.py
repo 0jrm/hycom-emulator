@@ -7,6 +7,7 @@ The config is a small YAML next to nothing in particular:
       train: [2025-03-04, 2025-07-31]
       val:   [2025-08-06, 2025-08-15]
       test:  [2025-08-21, 2025-09-01]
+    exclude_source_changes: true   # optional, default false
 
 Importing this module registers the datastore kind `hycom` with neural-lam.
 Training reads a pack_b00 folder staged in /dev/shm: state and forcing are memory-mapped .npy,
@@ -14,6 +15,9 @@ so the DataLoader workers (forked, see nlam.py) share one copy of the pages and 
 decoded per sample. A zarr opens lazily (no dask, so forking stays safe); fine for tests and scoring.
 A stack_b00 folder has a leading ensemble_member axis: neural-lam then draws each sample from one
 member, so every member is a separate run over the same dates.
+
+`exclude_source_changes` drops the train samples whose state rows straddle a change of source experiment
+(SOURCE_CHANGES): a jump between two experiments is not dynamics. nlam.py applies it to the train split only.
 """
 
 from __future__ import annotations
@@ -30,6 +34,20 @@ from neural_lam.datastore import DATASTORES
 from neural_lam.datastore.base import BaseRegularGridDatastore, CartesianGridShape
 
 CATEGORIES = ("state", "forcing", "static")
+# Days whose reanalysis row comes from another source than the day before (docs/rea-pipeline.md).
+SOURCE_CHANGES = np.array(
+    ["2017-06-01", "2017-06-02", "2021-01-01", "2024-01-01", "2024-01-02", "2024-01-06", "2024-02-01", "2024-02-02", "2024-04-02"],
+    dtype="datetime64[D]",
+)
+
+
+def kept_windows(times: np.ndarray, n_rows: int, n_samples: int, changes: np.ndarray = SOURCE_CHANGES) -> np.ndarray:
+    """Indices i < n_samples of the windows times[i]..times[i + n_rows - 1] that hold no change day c with
+    first < c <= last, so no two rows of a window come from different sources. Compared as whole days."""
+    days = np.asarray(times).astype("datetime64[D]")
+    first, last = days[:n_samples, None], days[n_rows - 1 : n_rows - 1 + n_samples, None]
+    c = np.asarray(changes, dtype="datetime64[D]")[None]
+    return np.flatnonzero(~((first < c) & (c <= last)).any(1))
 
 
 class HycomDatastore(BaseRegularGridDatastore):
@@ -55,6 +73,15 @@ class HycomDatastore(BaseRegularGridDatastore):
     @property
     def config(self) -> dict:
         return self._config
+
+    @property
+    def meta(self) -> xr.Dataset:
+        """The opened store: meta.zarr's variables plus state and forcing."""
+        return self._ds
+
+    @property
+    def exclude_source_changes(self) -> bool:
+        return bool(self._config.get("exclude_source_changes", False))
 
     @property
     def step_length(self) -> timedelta:

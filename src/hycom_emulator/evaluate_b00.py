@@ -101,23 +101,22 @@ def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int, model:
 
     import hycom_emulator.datastore  # noqa: F401  registers the hycom kind
     import hycom_emulator.convnet  # noqa: F401  registers hycom_graph_lam and hycom_conv_graph_lam
+    import hycom_emulator.gauss  # noqa: F401  checkpoints trained with loss wcrps_gauss name it
+    import hycom_emulator.rea_loss  # noqa: F401  checkpoints trained with loss rea_wmse name it
 
     config, ds = load_config_and_datastore(config_path=str(config_path))
     data = WeatherDataset(ds, split=split, ar_steps=ar_steps, num_past_forcing_steps=1, num_future_forcing_steps=1)
     module = None
     if ckpt is not None:
-        from neural_lam.train_model import load_forecaster_module_from_checkpoint
+        from neural_lam.models import MODELS, ForecasterModule
+        from neural_lam.train_model import build_predictor
+
+        from hycom_emulator.rea_train import ReaForecaster  # ARForecaster in eval, and carries a std_feedback predictor's sigma
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        if model is None:
-            module = load_forecaster_module_from_checkpoint(str(ckpt), config, ds)
-        else:
-            from neural_lam.models import MODELS, ARForecaster, ForecasterModule
-            from neural_lam.train_model import build_predictor
-
-            args = torch.load(ckpt, map_location="cpu", weights_only=False)["hyper_parameters"]["args"]
-            forecaster = ARForecaster(build_predictor(MODELS[model], args, config, ds), ds)
-            module = ForecasterModule.load_from_checkpoint(str(ckpt), forecaster=forecaster, datastore=ds, weights_only=False)
+        args = torch.load(ckpt, map_location="cpu", weights_only=False)["hyper_parameters"]["args"]
+        forecaster = ReaForecaster(build_predictor(MODELS[model or args.model], args, config, ds), ds)
+        module = ForecasterModule.load_from_checkpoint(str(ckpt), forecaster=forecaster, datastore=ds, weights_only=False)
         module = module.to(device).eval()
     return ds, data, module
 
