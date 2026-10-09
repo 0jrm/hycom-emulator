@@ -8,7 +8,15 @@
 - --pushforward K: the first K rollout steps run without gradient (Brandstetter et al. 2022), so step K learns from a
   state the model made itself instead of backpropagating through the whole chain.
 - --input_noise a: Gaussian noise of a times each channel's one-day change std on the two initial states (interior).
+- --train_first_step: with --pushforward K, step 1 keeps its gradient and steps 2..K+1 run without one, so the
+  one-day forecast from a true state stays trained.
 - --checkpoint_steps: recompute each step's activations in the backward pass (memory for time).
+- --compile: torch.compile each step predictor in place (state dict keys unchanged). Steps recomputed by
+  --checkpoint_steps run eagerly.
+- --nondeterministic: build the Trainer with deterministic=False (neural-lam hard-codes True; GraphLAM's scatter
+  sums are not deterministic on GPU either way, and the deterministic kernels cost 5-25% per step).
+- --plateau DECAY STOP: after DECAY validations without a relative gain of --plateau_threshold (default 0.005) in
+  val_mean_loss, multiply the learning rate by --lr_decay (default 0.5); after STOP such validations, stop the run.
 - --log_domain_means: also log, in validation, the Gulf-mean error and squared error of each rea_loss quantity in SI
   units per step of --val_steps_to_log (`val_<quantity>_err_unroll<k>`, `val_<quantity>_sqerr_unroll<k>`).
 
@@ -35,6 +43,7 @@ from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import pytorch_lightning as pl
 import torch
 from neural_lam.models import ARForecaster, ForecasterModule
 from torch.utils.checkpoint import checkpoint
@@ -51,6 +60,12 @@ class Options:
     input_noise: float = 0.0
     checkpoint_steps: bool = False
     log_domain_means: bool = False
+    train_first_step: bool = False
+    compile: bool = False
+    nondeterministic: bool = False
+    plateau: tuple[int, int] | None = None
+    plateau_threshold: float = 0.005
+    lr_decay: float = 0.5
 
 
 def _value(argv: list[str], flag: str, default: str | None = None) -> str | None:
@@ -69,8 +84,14 @@ def split_args(argv: list[str]) -> tuple[Options, list[str]]:
     p.add_argument("--input_noise", type=float, default=0.0)
     p.add_argument("--checkpoint_steps", action="store_true")
     p.add_argument("--log_domain_means", action="store_true")
+    p.add_argument("--train_first_step", action="store_true")
+    p.add_argument("--compile", action="store_true")
+    p.add_argument("--nondeterministic", action="store_true")
+    p.add_argument("--plateau", type=int, nargs=2, metavar=("DECAY", "STOP"))
+    p.add_argument("--plateau_threshold", type=float, default=0.005)
+    p.add_argument("--lr_decay", type=float, default=0.5)
     a, rest = p.parse_known_args(argv)
-    opts = Options(**vars(a))
+    opts = Options(**{**vars(a), "plateau": tuple(a.plateau) if a.plateau else None})
     rea = _value(rest, "--loss", "wmse") == "rea_wmse"
     if rea and opts.mean_penalty is None:
         p.error("--loss rea_wmse needs --mean_penalty (0 for the control)")
@@ -82,6 +103,10 @@ def split_args(argv: list[str]) -> tuple[Options, list[str]]:
         p.error("--log_domain_means replaces ForecasterModule, which crps_graph_lam's ensemble module also replaces")
     if min(opts.mean_penalty or 0.0, opts.amse, opts.pushforward, opts.input_noise) < 0:
         p.error("weights, --pushforward and --input_noise are >= 0")
+    if opts.train_first_step and not opts.pushforward:
+        p.error("--train_first_step needs --pushforward")
+    if opts.plateau and not (0 < opts.plateau[0] <= opts.plateau[1] and 0 < opts.lr_decay < 1 and 0 <= opts.plateau_threshold < 1):
+        p.error("--plateau DECAY STOP needs 0 < DECAY <= STOP, 0 < --lr_decay < 1 and 0 <= --plateau_threshold < 1")
     return opts, rest
 
 
@@ -104,12 +129,86 @@ def install(opts: Options, rest: list[str]) -> None:
         rea_loss.configure(means, inv_scale, opts.mean_penalty, opts.amse, (shape.x, shape.y))
     if opts.pushforward or opts.input_noise or opts.checkpoint_steps:
         tm.ARForecaster = functools.partial(ReaForecaster, pushforward=opts.pushforward, input_noise=opts.input_noise,
-                                            checkpoint_steps=opts.checkpoint_steps)
-        on.append(f"ReaForecaster pushforward {opts.pushforward} input_noise {opts.input_noise:g} checkpoint_steps {opts.checkpoint_steps}")
+                                            checkpoint_steps=opts.checkpoint_steps, train_first_step=opts.train_first_step)
+        on.append(f"ReaForecaster pushforward {opts.pushforward} train_first_step {opts.train_first_step} "
+                  f"input_noise {opts.input_noise:g} checkpoint_steps {opts.checkpoint_steps}")
+    if opts.compile:
+        build = tm.build_predictor
+
+        def compiled(*args, **kwargs):
+            predictor = build(*args, **kwargs)
+            predictor.compile()
+            return predictor
+
+        tm.build_predictor = compiled
+        on.append("torch.compile step predictor")
+    if opts.nondeterministic or opts.plateau:
+        tm.pl = _Lightning(tm.pl, opts)
+        on.append(f"Trainer deterministic {not opts.nondeterministic}"
+                  + (f"; plateau decay after {opts.plateau[0]} x{opts.lr_decay:g}, stop after {opts.plateau[1]}, "
+                     f"threshold {opts.plateau_threshold:g}" if opts.plateau else ""))
     if opts.log_domain_means:
         tm.ForecasterModule = ReaForecasterModule
         on.append("validation logs Gulf-mean errors")
     print("rea_train: " + ("; ".join(on) if on else "no arm switch on"), flush=True)
+
+
+class _Lightning:
+    """pytorch_lightning as neural-lam's train_model sees it, with Trainer built from opts: deterministic off on
+    request, and the Plateau callback added."""
+
+    def __init__(self, pl, opts: Options):
+        self._pl, self._opts = pl, opts
+
+    def __getattr__(self, name):
+        return getattr(self._pl, name)
+
+    def Trainer(self, *args, **kwargs):  # noqa: N802  stands in for pl.Trainer
+        if self._opts.nondeterministic:
+            kwargs["deterministic"] = False
+        if self._opts.plateau:
+            decay, stop = self._opts.plateau
+            kwargs["callbacks"] = [*kwargs.get("callbacks", []), Plateau(decay, stop, self._opts.plateau_threshold, self._opts.lr_decay)]
+        return self._pl.Trainer(*args, **kwargs)
+
+
+class Plateau(pl.Callback):
+    """Learning-rate decay and early stopping on val_mean_loss with one counter: a validation counts as stale unless it
+    beats the best so far by `threshold` (relative). After `decay` stale validations in a row the learning rate is
+    multiplied by `factor` (the counter restarts); after `stop` stale validations in total since the last gain the run
+    stops. The sanity check before training is ignored."""
+
+    def __init__(self, decay: int, stop: int, threshold: float = 0.005, factor: float = 0.5):
+        super().__init__()
+        self.decay, self.stop, self.threshold, self.factor = decay, stop, threshold, factor
+        self.best, self.stale, self.since_decay = math.inf, 0, 0
+
+    def update(self, loss: float) -> tuple[bool, bool]:
+        """(decay the learning rate now, stop now) after a validation with this loss."""
+        if loss < self.best * (1 - self.threshold):
+            self.best, self.stale, self.since_decay = loss, 0, 0
+            return False, False
+        self.stale += 1
+        self.since_decay += 1
+        decay = self.since_decay >= self.decay
+        if decay:
+            self.since_decay = 0
+        return decay, self.stale >= self.stop
+
+    def on_validation_end(self, trainer, module):
+        if trainer.sanity_checking or "val_mean_loss" not in trainer.callback_metrics:
+            return
+        decay, stop = self.update(float(trainer.callback_metrics["val_mean_loss"]))
+        if decay:
+            for opt in trainer.optimizers:
+                for group in opt.param_groups:
+                    group["lr"] *= self.factor
+        lr = trainer.optimizers[0].param_groups[0]["lr"]
+        print(f"plateau: val_mean_loss {float(trainer.callback_metrics['val_mean_loss']):.5f} best {self.best:.5f} "
+              f"stale {self.stale} lr {lr:.3g}{' (decayed)' if decay else ''}{' -> stop' if stop else ''}", flush=True)
+        if trainer.logger is not None:
+            trainer.logger.log_metrics({"lr": lr, "plateau_stale": self.stale}, step=trainer.global_step)
+        trainer.should_stop = trainer.should_stop or stop
 
 
 class ReaForecaster(ARForecaster):
@@ -121,11 +220,14 @@ class ReaForecaster(ARForecaster):
     - `input_noise` adds Gaussian noise of that many one-day change stds per channel to both initial states, on
       interior points only.
     - `checkpoint_steps` calls the predictor of each gradient step through activation checkpointing.
+    - `train_first_step` keeps step 1's gradient: then steps 2..pushforward+1 run under no_grad.
     """
 
-    def __init__(self, predictor, datastore, pushforward: int = 0, input_noise: float = 0.0, checkpoint_steps: bool = False):
+    def __init__(self, predictor, datastore, pushforward: int = 0, input_noise: float = 0.0, checkpoint_steps: bool = False,
+                 train_first_step: bool = False):
         super().__init__(predictor, datastore)
         self.pushforward, self.input_noise, self.checkpoint_steps = pushforward, input_noise, checkpoint_steps
+        self.train_first_step = train_first_step
         stats = datastore.get_standardization_dataarray("state")
         noise_std = input_noise * torch.tensor(stats.state_diff_std_standardized.values, dtype=torch.float32)
         self.register_buffer("noise_std", noise_std, persistent=False)
@@ -134,18 +236,21 @@ class ReaForecaster(ARForecaster):
         if not self.training:
             return super().forward(init_states, forcing_features, boundary_states)
         pred_steps = forcing_features.shape[1]
-        if self.pushforward >= pred_steps:
-            raise ValueError(f"pushforward {self.pushforward} leaves no gradient step in a {pred_steps}-step rollout")
+        free = self.pushforward + self.train_first_step
+        if free >= pred_steps:
+            raise ValueError(f"pushforward {self.pushforward} leaves no gradient step after it in a {pred_steps}-step rollout")
         if self.input_noise:
             init_states = init_states + torch.randn_like(init_states) * self.noise_std * self.interior_mask.unsqueeze(1)
         prev_prev_state, prev_state = init_states[:, 0], init_states[:, 1]
         predictions, stds = [], []
         for i in range(pred_steps):
-            grad = i >= self.pushforward
+            grad = i >= free or (i == 0 and self.train_first_step)
             with nullcontext() if grad else torch.no_grad():
                 args = (prev_state, prev_prev_state, forcing_features[:, i])
                 if grad and self.checkpoint_steps:
-                    pred_state, pred_std = checkpoint(self.predictor, *args, use_reentrant=False)
+                    # .forward, not the module call: with --compile both the forward and its recomputation run
+                    # eagerly, since a compiled forward and an eager recomputation disagree on tensor layout.
+                    pred_state, pred_std = checkpoint(self.predictor.forward, *args, use_reentrant=False)
                 else:
                     pred_state, pred_std = self.predictor(*args)
                 new_state = self.boundary_mask * boundary_states[:, i] + self.interior_mask * pred_state

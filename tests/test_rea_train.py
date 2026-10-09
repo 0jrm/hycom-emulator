@@ -123,6 +123,10 @@ def test_split_args_takes_our_flags_and_leaves_neural_lams():
     ["--model", "crps_graph_lam", "--loss", "fcrps", "--mean_penalty", "0"],
     ["--model", "crps_graph_lam", "--loss", "afcrps", "--amse", "0.1"],
     ["--model", "crps_graph_lam", "--loss", "afcrps", "--log_domain_means"],
+    ["--train_first_step"],
+    ["--plateau", "3", "2"],
+    ["--plateau", "0", "2"],
+    ["--plateau", "2", "3", "--lr_decay", "1"],
 ])
 def test_split_args_refuses_an_inconsistent_set(argv):
     with pytest.raises(SystemExit):
@@ -140,3 +144,60 @@ def test_install_swaps_the_forecaster_class(monkeypatch):
     fc = tm.ARForecaster(_Linear(), _Store())
     assert isinstance(fc, ReaForecaster) and fc.pushforward == 1
     assert not dict(fc.state_dict(keep_vars=True)).keys() - {"predictor.a"}, "no new weights in the checkpoint"
+
+
+def test_train_first_step_keeps_step_one_and_skips_the_next_pushforward_steps():
+    fc = _forecaster(pushforward=2, train_first_step=True).train()
+    pred, _ = fc(*_inputs(np.random.default_rng(5), t=5))
+    grad = lambda k: torch.autograd.grad(pred[:, k].sum(), fc.predictor.a, retain_graph=True)[0]  # noqa: E731
+    assert grad(0) != 0, "step 1 keeps its gradient"
+    assert grad(1) == 0 and grad(2) == 0, "steps 2 and 3 are the pushforward steps"
+    interior = torch.tensor(~BOUNDARY)[:, None]
+    assert torch.allclose(grad(3), (pred[:, 2] * interior).sum()), "step 4 starts from a detached state"
+    with pytest.raises(ValueError, match="pushforward"):
+        _forecaster(pushforward=2, train_first_step=True).train()(*_inputs(np.random.default_rng(5), t=3))
+
+
+def test_plateau_decays_after_decay_stale_validations_and_stops_after_stop():
+    p = rea_train.Plateau(decay=2, stop=3, threshold=0.01)
+    seen = [p.update(v) for v in (1.0, 0.95, 0.948, 0.95, 0.947, 0.90, 0.95, 0.95, 0.95)]
+    assert seen == [(False, False), (False, False), (False, False), (True, False), (False, True),
+                    (False, False), (False, False), (True, False), (False, True)]
+    assert p.best == 0.90
+
+
+def test_split_args_takes_the_round_switches():
+    opts, rest = split_args(["--pushforward", "4", "--train_first_step", "--compile", "--nondeterministic",
+                             "--plateau", "2", "3", "--lr", "1e-3"])
+    assert (opts.train_first_step, opts.compile, opts.nondeterministic, opts.plateau) == (True, True, True, (2, 3))
+    assert (opts.plateau_threshold, opts.lr_decay) == (0.005, 0.5) and rest == ["--lr", "1e-3"]
+
+
+def test_lightning_shim_turns_determinism_off_and_adds_plateau():
+    class FakePL:
+        callbacks = "callbacks module"
+
+        @staticmethod
+        def Trainer(**kwargs):  # noqa: N802
+            return kwargs
+
+    shim = rea_train._Lightning(FakePL, Options(nondeterministic=True, plateau=(2, 3)))
+    kwargs = shim.Trainer(deterministic=True, callbacks=["ckpt"], max_epochs=5)
+    assert kwargs["deterministic"] is False and kwargs["max_epochs"] == 5
+    assert kwargs["callbacks"][0] == "ckpt" and isinstance(kwargs["callbacks"][1], rea_train.Plateau)
+    assert shim.callbacks == "callbacks module", "everything else is pytorch_lightning's"
+    assert rea_train._Lightning(FakePL, Options(plateau=(2, 3))).Trainer(deterministic=True)["deterministic"] is True
+
+
+def test_install_compiles_the_predictor_in_place(monkeypatch):
+    built = []
+
+    class Pred(torch.nn.Module):
+        def compile(self):
+            built.append("compiled")
+
+    monkeypatch.setattr(tm, "build_predictor", lambda *a, **k: Pred())
+    monkeypatch.setattr(tm, "ARForecaster", tm.ARForecaster)
+    monkeypatch.setattr(tm, "ForecasterModule", tm.ForecasterModule)
+    rea_train.install(Options(compile=True), ["--config_path", "n.yaml"])
+    assert isinstance(tm.build_predictor(), Pred) and built == ["compiled"]
