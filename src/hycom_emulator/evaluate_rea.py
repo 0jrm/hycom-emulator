@@ -8,20 +8,29 @@ column aggregates to 2000 m, each level weighted by the depth interval it repres
 `gulf`; or, with --region interior, all ocean as evaluate_b00 scores it), outside the boundary band, real at that level (`level_ocean`); weight cos^2(lat), the cell area of the
 Mercator grid. These are free forecasts given the true daily wind and the true boundary band: the pack has no
 increment channels and no observation enters after t0.
+
+Fronts: the 1.5 kt surface isotach distances (isotach.front_distance) of the model and of persistence at every
+lead, as medians over the samples where both fronts exist, with a count of each FrontStatus. Surface speed is
+hypot(u_0m, v_0m): the product's z-level u/v are total velocity at p-points (docs/isotach.md). The region is
+isotach.gulf_region of the pack's own depth, lon and lat, whatever --region says.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import xarray as xr
 import yaml
 
+from hycom_emulator.isotach import ISOTACH_MS, FrontDistance, FrontStatus, front_distance, gulf_region, mercator_cell_km, to_grid
+
 LEVEL_VARS = ("temp", "salin", "u", "v")
 SUMS = ("w", "e2_model", "e2_pers", "e_model", "e_pers", "a", "b", "aa", "bb", "ab")
+FRONT_KM = ("hausdorff_km", "mean_km", "p95_km")
 
 
 def level_weights(levels: np.ndarray, bottom: float = 2000.0) -> np.ndarray:
@@ -89,6 +98,47 @@ def cell_area(meta: xr.Dataset) -> np.ndarray:
     return np.cos(np.deg2rad(meta.static.sel(static_feature="lat").values)) ** 2
 
 
+@dataclass(frozen=True)
+class FrontGrid:
+    """What front scoring needs from a pack: the 0 m velocity channels and the (ny, nx) region and cell size."""
+
+    u: int
+    v: int
+    shape: tuple[int, int]
+    region: np.ndarray
+    cell_km: np.ndarray
+
+
+def front_grid(meta: xr.Dataset, names: list[str]) -> FrontGrid:
+    """Grid shape, cell size and region from the pack's coordinates and static fields, at the pack's stride."""
+    shape = (np.unique(meta.y.values).size, np.unique(meta.x.values).size)
+    lon, lat, depth = (to_grid(meta.static.sel(static_feature=k).values, shape) for k in ("lon", "lat", "depth"))
+    dlon = float(np.diff(lon[0]).mean())
+    return FrontGrid(names.index("u_0m"), names.index("v_0m"), shape, gulf_region(lon, lat, depth), mercator_cell_km(lat, dlon))
+
+
+def speed_0m(x: np.ndarray, fg: FrontGrid) -> np.ndarray:
+    """(..., grid, feature) -> (..., ny, nx) surface speed."""
+    return to_grid(np.hypot(x[..., fg.u], x[..., fg.v]), fg.shape)
+
+
+def front_distances(fg: FrontGrid, truth: np.ndarray, pred: np.ndarray) -> list[FrontDistance]:
+    """One FrontDistance per lead; truth is (lead, grid, feature), pred the same or one (grid, feature) state for every lead."""
+    true = speed_0m(truth, fg)
+    fc = np.broadcast_to(speed_0m(pred, fg), true.shape)
+    return [front_distance(p, t, fg.region, fg.cell_km) for p, t in zip(fc, true)]
+
+
+def summarize_fronts(rows: list[list[FrontDistance]]) -> dict:
+    """{lead: medians over samples whose status is ok, and the count of each status} from per-sample, per-lead rows."""
+    out = {}
+    for lead, ds in enumerate(zip(*rows)):
+        ok = [d for d in ds if d.status is FrontStatus.OK]
+        out[str(lead + 1)] = {k: float(np.median([getattr(d, k) for d in ok])) if ok else float("nan") for k in FRONT_KM}
+        out[str(lead + 1)]["status"] = {s.value: sum(d.status is s for d in ds) for s in FrontStatus}
+    return out
+
+
 def in_period(target_times_ns: np.ndarray, period: tuple[str, str] | None) -> bool:
     """True if the two initial days (the two days before the first target) and every target day lie in period."""
     if period is None:
@@ -108,15 +158,22 @@ def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | N
     assert names == ds.get_vars_names("state"), "datastore and meta.zarr disagree on state features"
     levels = meta.level.values.astype(float)
     w = point_weights(names, cell_area(meta), regions(meta)[region_name], meta.level_ocean.values.astype(bool), levels)
+    fg = front_grid(meta, names)
     acc: dict = {}
+    fronts: dict[str, list] = {"model": [], "persistence": []}
     indices = [i for i in range(len(data)) if in_period(data[i][3].numpy(), period)][:limit]
     for i in indices:
         sample = data[i]
-        accumulate(acc, sample[0][-1].numpy(), sample[1].numpy(), forecast(module, sample), w)
+        x0, truth, pred = sample[0][-1].numpy(), sample[1].numpy(), forecast(module, sample)
+        accumulate(acc, x0, truth, pred, w)
+        fronts["model"].append(front_distances(fg, truth, pred))
+        fronts["persistence"].append(front_distances(fg, truth, x0))
     return {
         "label": "free forecast given the true daily wind and boundary band (no increments, no observations after t0)",
         "region": region_name, "period": list(period) if period else None, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt), "samples": len(indices),
         "fields": summarize(acc, names, level_weights(levels)),
+        "fronts": {"isotach_ms": ISOTACH_MS, "region": "depth > 500 m, lon <= -81, lat >= 21.5", "statistic": "median over samples whose status is ok",
+                   **{k: summarize_fronts(rows) for k, rows in fronts.items()}},
     }
 
 
@@ -136,6 +193,9 @@ def main() -> None:
     for name in (*LEVEL_VARS, "ssh"):
         row = " ".join(f"{lead}d {s['rmse_model'] / s['rmse_persistence']:.3f}" for lead, s in r["fields"][name].items())
         print(f"{name:6s} RMSE/persistence {row}")
+    for kind in ("model", "persistence"):
+        row = " ".join(f"{lead}d {s['mean_km']:.1f}/{s['p95_km']:.1f}/{s['hausdorff_km']:.1f}" for lead, s in r["fronts"][kind].items())
+        print(f"front {kind:11s} mean/p95/hausdorff km {row}")
 
 
 if __name__ == "__main__":
