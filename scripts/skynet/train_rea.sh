@@ -6,7 +6,9 @@
 # EPOCHS_<days> and a hard time cap CAP_<days>; with --plateau in EXTRA_ARGS a stage also stops when validation stalls.
 # Stage <days> validates EVAL_<days> days (default max(4, days)) and keeps its own best; the scored checkpoint is the
 # last stage's best. The first stage starts at LR (default 1e-3); each later stage starts at twice the learning rate
-# the previous stage ended with (logged by --plateau), at most LR. PF_<days> is the stage's --pushforward (default 4 from 8 days on, else 0; FIRST=1 adds
+# the previous stage ended with (logged by --plateau), at least LR_FLOOR (default 1e-4) and at most LR. START_CKPT
+# resumes a curriculum: the first listed stage loads it, and START_RUN names the mlflow run (in this out_dir) whose
+# last learning rate sets that stage's starting rate by the same rule. PF_<days> is the stage's --pushforward (default 4 from 8 days on, else 0; FIRST=1 adds
 # --train_first_step), CKPT_<days>=1 its --checkpoint_steps (default from 16 days on). The test split is then scored
 # over the last stage's validation horizon with neural-lam's own per-lead metrics.
 # EXCLUDE_SOURCE_CHANGES=1 drops train windows that straddle a change of reanalysis experiment.
@@ -58,7 +60,9 @@ declare -A EPOCHS_DEF=([1]=30 [2]=15 [4]=10 [8]=8 [16]=6) CAP_DEF=([1]=4h [2]=3h
 
 echo "== $(date -Is) graph"
 timeout 30m $PY -m hycom_emulator.nlam build_graph nlam.yaml multiscale
-PREV=""; E=0; STAGE_LR=${LR:-1e-3}
+next_lr() { $PY -c "import sys; lr, floor, end = map(float, sys.argv[1:]); print(min(lr, max(floor, 2 * end)))" "${LR:-1e-3}" "${LR_FLOOR:-1e-4}" "$1"; }
+PREV=${START_CKPT:-}; E=0; STAGE_LR=${LR:-1e-3}
+if [ -n "${START_RUN:-}" ]; then END_LR=$(last_lr "$START_RUN"); [ -z "$END_LR" ] || STAGE_LR=$(next_lr "$END_LR"); fi
 for AR in ${STAGES:-1 2 4 8 16}; do
   EP=EPOCHS_$AR; CP=CAP_$AR; EV=EVAL_$AR; PFV=PF_$AR; CKV=CKPT_$AR
   EVAL=${!EV:-$(( AR > 4 ? AR : 4 ))}; PF=${!PFV:-$(( AR >= 8 ? 4 : 0 ))}; CKPT=${!CKV:-$(( AR >= 16 ? 1 : 0 ))}
@@ -74,7 +78,7 @@ for AR in ${STAGES:-1 2 4 8 16}; do
   [ -n "$PREV" ] || { echo "stage ${AR}-day left no checkpoint"; exit 1; }
   echo "after stage ${AR}-day best: $PREV"
   END_LR=$(last_lr "$RUN_ID-d$AR")
-  [ -z "$END_LR" ] || STAGE_LR=$($PY -c "import sys; print(min(float(sys.argv[1]), 2 * float(sys.argv[2])))" "${LR:-1e-3}" "$END_LR")
+  [ -z "$END_LR" ] || STAGE_LR=$(next_lr "$END_LR")
 done
 echo "scored checkpoint: $PREV"
 echo "== $(date -Is) test"
