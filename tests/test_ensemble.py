@@ -204,3 +204,41 @@ def test_checkpointed_steps_give_the_same_loss_and_gradients(ds, tmp_path):
     (l0, g0), (l1, g1) = grads
     assert torch.equal(l0, l1) and len(g0) == len(g1)
     assert all(torch.allclose(a, b, rtol=1e-5, atol=1e-7) for a, b in zip(g0, g1)), "recomputed steps must redraw the same noise"
+
+
+def test_validation_draws_the_same_noise_every_time_and_leaves_the_training_stream_alone(ds, tmp_path):
+    _, module = ensemble_module(ds, tmp_path)
+    for layer in module.forecaster.predictor.film:
+        torch.nn.init.normal_(layer.weight, std=0.1)
+    module.eval()
+    init, target, forcing, _ = rollout_batch(ds[1])
+    torch.manual_seed(11)
+    expected = torch.rand(3)
+    torch.manual_seed(11)
+    runs = []
+    for _ in range(2):
+        module.on_validation_start()
+        runs.append(module.forecast_members(init, forcing, target, 2))
+        module.on_validation_end()
+    assert torch.equal(*runs), "every validation must draw the same noise"
+    assert torch.equal(torch.rand(3), expected), "the training RNG stream must continue where validation found it"
+
+
+def test_noise_modulates_the_layer_update_not_the_mesh_state(ds, monkeypatch):
+    """With one processor layer, scale c and no shift, the noisy output is h + (1 + c) (net(h) - h): the noise
+    multiplies the layer's update. Multiplying the state itself, net((1 + c) h), compounded through the layers."""
+    from hycom_emulator.ensemble import NOISE_DIM
+
+    _, datastore = ds
+    torch.manual_seed(0)
+    noisy = CRPSGraphLAM(datastore=datastore, graph_name="multiscale", hidden_dim=HIDDEN, processor_layers=1)
+    c = 3.0
+    with torch.no_grad():
+        noisy.film[0].weight.zero_()
+        noisy.film[0].weight[:HIDDEN] = c / NOISE_DIM
+    h = torch.randn(2, noisy.get_num_mesh()[0], HIDDEN, generator=torch.Generator().manual_seed(1))
+    monkeypatch.setattr(torch, "randn", lambda *shape, **kw: torch.ones(*shape, **kw))
+    noisy.noise_scale = 0.0
+    plain = noisy.process_step(h)
+    noisy.noise_scale = 1.0
+    assert torch.allclose(noisy.process_step(h), h + (1 + c) * (plain - h), atol=1e-5)

@@ -1,10 +1,11 @@
 """A stochastic GraphLAM trained with an ensemble CRPS (card arm 2 of the reanalysis emulator).
 
-Each step draws one noise vector z ~ N(0, I_32) per ensemble member. Before every processor layer the
-mesh representation is modulated as h * (1 + W_s z) + W_b z (FiLM). W_s and W_b have no bias and start at
-zero, so the model starts as the GraphLAM checkpoint it loads, and z = 0 reproduces that GraphLAM with the
-current weights. z is global: it is the same at every mesh node, and the processor turns it into
-spatially structured perturbations (FGN, Alet et al. 2025, conditions its layer norms the same way).
+Each step draws one noise vector z ~ N(0, I_32) per ensemble member. Each processor layer's update d (the
+layer-normed output it adds to the mesh representation h) is modulated as h + d * (1 + W_s z) + W_b z (FiLM on
+the update, as the conditional layer norms of AIFS-CRPS and FGN, Alet et al. 2025). W_s and W_b have no bias and
+start at zero, so the model starts as the GraphLAM checkpoint it loads, and z = 0 reproduces that GraphLAM with
+the current weights. z is global: it is the same at every mesh node, and the processor turns it into spatially
+structured perturbations.
 
 Members ride on the batch axis. EnsembleForecasterModule repeats each sample M times, unrolls
 neural-lam's ARForecaster unchanged (the true boundary band overwrites every member), and scores the M
@@ -14,7 +15,8 @@ forecasts with the almost-fair CRPS of AIFS-CRPS (Lang et al. 2024):
 
 alpha = 1 is the fair CRPS, alpha = 0 the plain ensemble CRPS. Each entry is divided by neural-lam's
 per_var_std (the 1-day change std, as in wmae) and reduced like wmse: mean over interior grid points,
-sum over channels. Validation and test metrics see the ensemble mean.
+sum over channels. Validation and test metrics see the ensemble mean, and draw the same noise at every validation
+(EVAL_SEED), so val_mean_loss compares weights.
 
     train_model --model crps_graph_lam --loss afcrps --members 2 --init_from <graph_lam.ckpt>
 
@@ -39,6 +41,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 NOISE_DIM = 32
+EVAL_SEED = 31
 FILM = "film."
 LOSSES = ("afcrps", "fcrps")
 
@@ -61,13 +64,17 @@ class CRPSGraphLAM(GraphLAM):
         return super().forward(prev_state, prev_prev_state, forcing)
 
     def process_step(self, mesh_rep):
+        """Each processor layer's update (its layer-normed MLP output) is modulated, not the residual stream it is
+        added to: the noise then enters additively and stays bounded by the update's scale. Modulating the stream
+        itself compounded through the layers (mesh values 200-300x the deterministic model's after four layers)
+        and overflowed fp16 on 0.1-2% of the training steps."""
         batch_size = mesh_rep.shape[0]
         z = self.noise_scale * torch.randn(batch_size, 1, NOISE_DIM, device=mesh_rep.device, dtype=mesh_rep.dtype)
         edge_rep = self.expand_to_batch(self.m2m_embedder(self.m2m_features), batch_size)
         for net, film in zip(self.processor.children(), self.film):
             scale, shift = film(z).chunk(2, dim=-1)
-            mesh_rep = mesh_rep * (1 + scale) + shift
-            mesh_rep, edge_rep = net(mesh_rep, mesh_rep, edge_rep)
+            new_rep, edge_rep = net(mesh_rep, mesh_rep, edge_rep)
+            mesh_rep = mesh_rep + (new_rep - mesh_rep) * (1 + scale) + shift
         return mesh_rep
 
 
@@ -105,6 +112,19 @@ class EnsembleForecasterModule(ForecasterModule):
         if members < 2:
             raise ValueError("--members must be at least 2")
         self.members = members
+
+    def on_validation_start(self):
+        """Validation and test draw the same noise every time, so val_mean_loss compares weights, not draws: with 2
+        members one checkpoint's val_mean_loss moved 1% between draws, twice the plateau threshold. The training
+        stream (noise, the next epoch's shuffle) resumes where it was."""
+        self._training_rng = torch.random.get_rng_state(), torch.cuda.get_rng_state_all()
+        torch.manual_seed(EVAL_SEED)
+
+    def on_validation_end(self):
+        torch.random.set_rng_state(self._training_rng[0])
+        torch.cuda.set_rng_state_all(self._training_rng[1])
+
+    on_test_start, on_test_end = on_validation_start, on_validation_end
 
     def forecast_members(self, init_states, forcing, boundary_states, members: int):
         """(B, M, T, N, F) standardized forecasts: member j of sample b is batch row b * M + j."""
