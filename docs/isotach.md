@@ -69,3 +69,40 @@ Spearman correlation of the surrogate with each distance across samples:
 | east of 90W | 2 | 0.03 | 0.84 | 0.85 |
 
 The surrogate tracks the mean and p95 distances. It does not reliably track the maximum. The maximum is set by a few pixels. In the smoke run, the worst pixels were a one-pixel fast patch near 89.7W 24.4N and a speed patch near the threshold on the western boundary current at 97.3W 22.1N, not the Loop Current itself. The mean and p95 shifts of 6 to 11 km/day and 16 to 29 km/day fit Loop Current front motion.
+
+## Reanalysis read-out
+
+`evaluate_rea` scores the front of the model and of persistence at every lead, under `fronts` in its JSON. Each lead holds the medians of `hausdorff_km`, `mean_km` and `p95_km` over the samples where both fronts exist, and a count of each status. The metric is evaluation only. No training loss uses it.
+
+### Surface speed
+
+Surface speed is `hypot(u_0m, v_0m)`. The reanalysis pack (`rea_pack.py`) reads u and v from the product's z-level files (`gomb4_daily_*_3z.nc`), not from archv layers. These values are total velocity at p-points, for three reasons:
+
+- Each daily file is an `ncra` mean of hourly `038_archv.*_3z.nc` files from `archv2ncdf3z` (the `history` attribute). By default (`baclin` 0), archv2data3z adds `ubaro` to archv layer velocity and moves each layer's face velocities to the p-point (`uvp`) before it interpolates to z.
+- The files have one Longitude and one Latitude axis for every variable.
+- For 2024-04-09, deeper than 1000 m, the depth mean of the 3z `u` matches `u_barotropic_velocity`. The correlation is 0.997, and the rms difference is 0.006 m/s against an rms of 0.074 m/s. For v the figures are 0.997 and 0.006 m/s against 0.073 m/s. A baroclinic layer velocity would have a depth mean near zero.
+
+So `surface_speed` does not apply here: there is no `ubaro` to add and no face to average.
+
+### Grid and region
+
+`front_grid` reads the grid shape and the longitude step from the pack's coordinates. The stride-2 pack is 193 x 263 with a 0.08 deg step. Its cells are 8.46 km at the southern edge and 7.55 km at the northern edge, twice the native size. The region is `gulf_region` of the pack's own static depth, lon and lat: 12931 points, none in the boundary band. `--region` does not change it.
+
+At stride 2, a one-cell shift is about 8 km. This is larger than the 1-day persistence mean at full resolution, so compare a model with persistence on the same pack, not with the table above.
+
+### Smoke result
+
+These figures are for `emu-rea-s2b/scored.ckpt` on the first 24 test samples (January 2024), 4-day rollouts. Every sample had both fronts. Values are medians in km.
+
+| forecast | lead (days) | Hausdorff | mean | p95 |
+|---|---|---|---|---|
+| model | 1 | 59.1 | 4.8 | 12.8 |
+| model | 2 | 73.6 | 7.0 | 17.9 |
+| model | 3 | 123.9 | 8.3 | 22.7 |
+| model | 4 | 157.1 | 9.9 | 24.0 |
+| persistence | 1 | 206.5 | 10.4 | 27.2 |
+| persistence | 2 | 281.5 | 14.3 | 34.9 |
+| persistence | 3 | 216.2 | 14.6 | 40.7 |
+| persistence | 4 | 187.1 | 15.6 | 46.7 |
+
+The persistence mean distances at leads 1 and 2 are about 3 km above the full-resolution baseline. The coarser cells fit that, though the season and the product also differ. The model halves the persistence mean and p95 distances at lead 1, and the gap narrows by lead 4.
