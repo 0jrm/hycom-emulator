@@ -99,8 +99,8 @@ def split_args(argv: list[str]) -> tuple[Options, list[str]]:
         p.error("--mean_penalty and --amse need --loss rea_wmse")
     if opts.mean_penalty and opts.mean_scales is None:
         p.error("--mean_penalty > 0 needs --mean_scales")
-    if opts.log_domain_means and _value(rest, "--model", "graph_lam") == "crps_graph_lam":
-        p.error("--log_domain_means replaces ForecasterModule, which crps_graph_lam's ensemble module also replaces")
+    if opts.log_domain_means and (_value(rest, "--model", "graph_lam") == "crps_graph_lam" or _value(rest, "--loss") == "wcrps_gauss"):
+        p.error("--log_domain_means replaces ForecasterModule, which the crps and Gaussian-head arms also replace")
     if min(opts.mean_penalty or 0.0, opts.amse, opts.pushforward, opts.input_noise) < 0:
         p.error("weights, --pushforward and --input_noise are >= 0")
     if opts.train_first_step and not opts.pushforward:
@@ -212,7 +212,8 @@ class Plateau(pl.Callback):
 
 
 class ReaForecaster(ARForecaster):
-    """ARForecaster with the training-time switches; in eval mode it is ARForecaster exactly.
+    """ARForecaster with the training-time switches; in eval mode it is ARForecaster exactly, unless the predictor
+    takes its previous std (`std_feedback`, hycom_emulator.gauss.StdFeedbackGraphLAM).
 
     Training unrolls like ARForecaster (boundary overwritten with the truth at each step), except:
     - the first `pushforward` steps run under no_grad, so step `pushforward` starts from a detached state the model
@@ -221,6 +222,10 @@ class ReaForecaster(ARForecaster):
       interior points only.
     - `checkpoint_steps` calls the predictor of each gradient step through activation checkpointing.
     - `train_first_step` keeps step 1's gradient: then steps 2..pushforward+1 run under no_grad.
+
+    A `std_feedback` predictor is called with a fourth argument in training and in eval: the std it predicted for the
+    previous step, 0 at step 1 (the initial states are true) and 0 in the boundary band (overwritten with the truth).
+    It is carried like the state: detached after a no_grad step, recomputed with it in a checkpointed one.
     """
 
     def __init__(self, predictor, datastore, pushforward: int = 0, input_noise: float = 0.0, checkpoint_steps: bool = False,
@@ -233,21 +238,23 @@ class ReaForecaster(ARForecaster):
         self.register_buffer("noise_std", noise_std, persistent=False)
 
     def forward(self, init_states, forcing_features, boundary_states):
-        if not self.training:
+        feedback = getattr(self.predictor, "std_feedback", False)
+        if not (self.training or feedback):
             return super().forward(init_states, forcing_features, boundary_states)
         pred_steps = forcing_features.shape[1]
-        free = self.pushforward + self.train_first_step
+        free = self.pushforward + self.train_first_step if self.training else 0
         if free >= pred_steps:
             raise ValueError(f"pushforward {self.pushforward} leaves no gradient step after it in a {pred_steps}-step rollout")
-        if self.input_noise:
+        if self.training and self.input_noise:
             init_states = init_states + torch.randn_like(init_states) * self.noise_std * self.interior_mask.unsqueeze(1)
         prev_prev_state, prev_state = init_states[:, 0], init_states[:, 1]
+        carried = (torch.zeros_like(prev_state),) if feedback else ()
         predictions, stds = [], []
         for i in range(pred_steps):
             grad = i >= free or (i == 0 and self.train_first_step)
             with nullcontext() if grad else torch.no_grad():
-                args = (prev_state, prev_prev_state, forcing_features[:, i])
-                if grad and self.checkpoint_steps:
+                args = (prev_state, prev_prev_state, forcing_features[:, i], *carried)
+                if grad and self.training and self.checkpoint_steps:
                     # .forward, not the module call: with --compile both the forward and its recomputation run
                     # eagerly, since a compiled forward and an eager recomputation disagree on tensor layout.
                     pred_state, pred_std = checkpoint(self.predictor.forward, *args, use_reentrant=False)
@@ -257,6 +264,8 @@ class ReaForecaster(ARForecaster):
             predictions.append(new_state)
             if pred_std is not None:
                 stds.append(pred_std)
+            if feedback:
+                carried = (self.interior_mask * pred_std,)
             prev_prev_state, prev_state = prev_state, new_state
         return torch.stack(predictions, dim=1), torch.stack(stds, dim=1) if stds else None
 
