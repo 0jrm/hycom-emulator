@@ -222,3 +222,23 @@ def test_validation_draws_the_same_noise_every_time_and_leaves_the_training_stre
         module.on_validation_end()
     assert torch.equal(*runs), "every validation must draw the same noise"
     assert torch.equal(torch.rand(3), expected), "the training RNG stream must continue where validation found it"
+
+
+def test_noise_modulates_the_layer_update_not_the_mesh_state(ds, monkeypatch):
+    """With one processor layer, scale c and no shift, the noisy output is h + (1 + c) (net(h) - h): the noise
+    multiplies the layer's update. Multiplying the state itself, net((1 + c) h), compounded through the layers."""
+    from hycom_emulator.ensemble import NOISE_DIM
+
+    _, datastore = ds
+    torch.manual_seed(0)
+    noisy = CRPSGraphLAM(datastore=datastore, graph_name="multiscale", hidden_dim=HIDDEN, processor_layers=1)
+    c = 3.0
+    with torch.no_grad():
+        noisy.film[0].weight.zero_()
+        noisy.film[0].weight[:HIDDEN] = c / NOISE_DIM
+    h = torch.randn(2, noisy.get_num_mesh()[0], HIDDEN, generator=torch.Generator().manual_seed(1))
+    monkeypatch.setattr(torch, "randn", lambda *shape, **kw: torch.ones(*shape, **kw))
+    noisy.noise_scale = 0.0
+    plain = noisy.process_step(h)
+    noisy.noise_scale = 1.0
+    assert torch.allclose(noisy.process_step(h), h + (1 + c) * (plain - h), atol=1e-5)
