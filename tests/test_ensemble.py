@@ -204,3 +204,21 @@ def test_checkpointed_steps_give_the_same_loss_and_gradients(ds, tmp_path):
     (l0, g0), (l1, g1) = grads
     assert torch.equal(l0, l1) and len(g0) == len(g1)
     assert all(torch.allclose(a, b, rtol=1e-5, atol=1e-7) for a, b in zip(g0, g1)), "recomputed steps must redraw the same noise"
+
+
+def test_validation_draws_the_same_noise_every_time_and_leaves_the_training_stream_alone(ds, tmp_path):
+    _, module = ensemble_module(ds, tmp_path)
+    for layer in module.forecaster.predictor.film:
+        torch.nn.init.normal_(layer.weight, std=0.1)
+    module.eval()
+    init, target, forcing, _ = rollout_batch(ds[1])
+    torch.manual_seed(11)
+    expected = torch.rand(3)
+    torch.manual_seed(11)
+    runs = []
+    for _ in range(2):
+        module.on_validation_start()
+        runs.append(module.forecast_members(init, forcing, target, 2))
+        module.on_validation_end()
+    assert torch.equal(*runs), "every validation must draw the same noise"
+    assert torch.equal(torch.rand(3), expected), "the training RNG stream must continue where validation found it"
