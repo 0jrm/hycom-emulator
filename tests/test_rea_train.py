@@ -123,6 +123,7 @@ def test_split_args_takes_our_flags_and_leaves_neural_lams():
     ["--model", "crps_graph_lam", "--loss", "fcrps", "--mean_penalty", "0"],
     ["--model", "crps_graph_lam", "--loss", "afcrps", "--amse", "0.1"],
     ["--model", "crps_graph_lam", "--loss", "afcrps", "--log_domain_means"],
+    ["--output_std", "--loss", "wcrps_gauss", "--log_domain_means"],
     ["--train_first_step"],
     ["--plateau", "3", "2"],
     ["--plateau", "0", "2"],
