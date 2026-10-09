@@ -14,7 +14,8 @@ forecasts with the almost-fair CRPS of AIFS-CRPS (Lang et al. 2024):
 
 alpha = 1 is the fair CRPS, alpha = 0 the plain ensemble CRPS. Each entry is divided by neural-lam's
 per_var_std (the 1-day change std, as in wmae) and reduced like wmse: mean over interior grid points,
-sum over channels. Validation and test metrics see the ensemble mean.
+sum over channels. Validation and test metrics see the ensemble mean, and draw the same noise at every validation
+(EVAL_SEED), so val_mean_loss compares weights.
 
     train_model --model crps_graph_lam --loss afcrps --members 2 --init_from <graph_lam.ckpt>
 
@@ -39,6 +40,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint
 
 NOISE_DIM = 32
+EVAL_SEED = 31
 FILM = "film."
 LOSSES = ("afcrps", "fcrps")
 
@@ -105,6 +107,19 @@ class EnsembleForecasterModule(ForecasterModule):
         if members < 2:
             raise ValueError("--members must be at least 2")
         self.members = members
+
+    def on_validation_start(self):
+        """Validation and test draw the same noise every time, so val_mean_loss compares weights, not draws: with 2
+        members one checkpoint's val_mean_loss moved 1% between draws, twice the plateau threshold. The training
+        stream (noise, the next epoch's shuffle) resumes where it was."""
+        self._training_rng = torch.random.get_rng_state(), torch.cuda.get_rng_state_all()
+        torch.manual_seed(EVAL_SEED)
+
+    def on_validation_end(self):
+        torch.random.set_rng_state(self._training_rng[0])
+        torch.cuda.set_rng_state_all(self._training_rng[1])
+
+    on_test_start, on_test_end = on_validation_start, on_validation_end
 
     def forecast_members(self, init_states, forcing, boundary_states, members: int):
         """(B, M, T, N, F) standardized forecasts: member j of sample b is batch row b * M + j."""
