@@ -4,11 +4,12 @@ Deterministic `wmse` training rewards the mean of the possible futures. In a fre
 
 ## Model
 
-`crps_graph_lam` (`hycom_emulator.ensemble`) is GraphLAM with one change in the processor. Each step draws z ~ N(0, I_32) per member. Before each of the processor layers the mesh state h becomes h (1 + W_s z) + W_b z. W_s and W_b are linear maps without bias, one pair per layer, and they start at zero. Consequences:
+`crps_graph_lam` (`hycom_emulator.ensemble`) is GraphLAM with one change in the processor. Each step draws z ~ N(0, I_32) per member. Each processor layer adds a layer-normed update d to the mesh state h; the noisy model adds d (1 + W_s z) + W_b z instead. W_s and W_b are linear maps without bias, one pair per layer, and they start at zero. Consequences:
 
 - A `graph_lam` checkpoint loads strictly (missing FiLM weights are filled with zeros), and the fine-tune starts exactly at that model.
 - z = 0 gives the deterministic GraphLAM of the current weights at any point in training: a control member for free.
 - z is one vector for the whole domain. The processor turns it into spatially structured perturbations, as in FGN (Alet et al. 2025). Nothing perturbs single mesh nodes independently.
+- The perturbation is additive and bounded by the update's scale, as the conditional layer norms of AIFS-CRPS and FGN. Until the audit of 2026-10-09 (`crps-audit.md`) the noise scaled the mesh state itself before each layer; that compounded through the layers (mesh values 200-300x the control's after four layers) and overflowed fp16 on 0.1-2% of the training steps. Checkpoints trained before the change load but their FiLM weights mean something else; see the audit for the list.
 
 ## Loss
 
@@ -16,7 +17,7 @@ Members ride on the batch axis: each sample is repeated M times and neural-lam's
 
     afCRPS = mean_j |x_j - y| - (1 - (1 - alpha) / M) / (2 M (M - 1)) sum_{j != k} |x_j - x_k|
 
-`--loss afcrps` has alpha = 0.95, `--loss fcrps` alpha = 1 (fair CRPS). With alpha = 1 and M = 2 any pair that brackets the truth scores 0 however far apart it is. The 5% plain-CRPS share removes that flat direction. Each entry is divided by neural-lam's per-channel `per_var_std` (the one-day change std, as `wmae` does) and reduced like `wmse`: mean over interior points, sum over the 91 channels, mean over the rollout. Validation and test metrics (`val_mse`, `test_mse`, `test_mae`) see the ensemble mean. `val_spread_skill` and `test_spread_skill` log the spread-skill ratio.
+`--loss afcrps` has alpha = 0.95, `--loss fcrps` alpha = 1 (fair CRPS). With alpha = 1 and M = 2 any pair that brackets the truth scores 0 however far apart it is. The 5% plain-CRPS share removes that flat direction. Each entry is divided by neural-lam's per-channel `per_var_std` (the one-day change std, as `wmae` does) and reduced like `wmse`: mean over interior points, sum over the 91 channels, mean over the rollout. Validation and test metrics (`val_mse`, `test_mse`, `test_mae`) see the ensemble mean. `val_spread_skill` and `test_spread_skill` log the spread-skill ratio. Validation and test draw the same noise every time (`EVAL_SEED`), so `val_mean_loss` compares weights, not draws: one checkpoint's value moved 1% between draws, twice the plateau threshold. The training noise and shuffle resume where validation found them.
 
 ## Flags
 
