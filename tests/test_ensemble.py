@@ -242,3 +242,26 @@ def test_noise_modulates_the_layer_update_not_the_mesh_state(ds, monkeypatch):
     plain = noisy.process_step(h)
     noisy.noise_scale = 1.0
     assert torch.allclose(noisy.process_step(h), h + (1 + c) * (plain - h), atol=1e-5)
+
+
+def test_evaluate_rea_zero_noise_scores_the_deterministic_rollout_of_a_members_module(ds):
+    from neural_lam.models import ARForecaster, ForecasterModule
+    from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
+
+    from hycom_emulator.evaluate_rea import noise_off
+
+    config, datastore = ds
+    parent = ARForecaster(build(GraphLAM, datastore, seed=0), datastore)
+    noisy = build(CRPSGraphLAM, datastore, seed=1)
+    noisy.load_state_dict(parent.predictor.state_dict(), strict=True)
+    for layer in noisy.film:
+        torch.nn.init.normal_(layer.weight)
+    module = ForecasterModule(forecaster=ARForecaster(noisy, datastore), config=config, datastore=datastore, loss="afcrps")
+    init, target, forcing, _ = rollout_batch(datastore)
+    noise_off(module)
+    a, _ = module.forecaster(init, forcing, target)
+    b, _ = module.forecaster(init, forcing, target)
+    assert torch.equal(a, b) and torch.equal(a, parent(init, forcing, target)[0]), "z = 0 must be the GraphLAM rollout"
+    plain = ForecasterModule(forecaster=parent, config=config, datastore=datastore)
+    with pytest.raises(ValueError, match="crps_graph_lam"):
+        noise_off(plain)
