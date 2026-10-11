@@ -1,6 +1,6 @@
 """Score a reanalysis-emulator checkpoint per field and lead against persistence, over the Gulf of Mexico.
 
-    python -m hycom_emulator.evaluate_rea <nlam.yaml> <checkpoint> <out.json> [--split test] [--ar-steps 4]
+    python -m hycom_emulator.evaluate_rea <nlam.yaml> <checkpoint> <out.json> [--split test] [--ar-steps 4] [--zero-noise]
 
 Every state channel is scored at every lead: RMSE and bias of the model and of persistence, and corr_change, the
 correlation of the predicted with the true change since the initial state. T, S, u and v are also scored as
@@ -13,6 +13,9 @@ Fronts: the 1.5 kt surface isotach distances (isotach.front_distance) of the mod
 lead, as medians over the samples where both fronts exist, with a count of each FrontStatus. Surface speed is
 hypot(u_0m, v_0m): the product's z-level u/v are total velocity at p-points (docs/isotach.md). The region is
 isotach.gulf_region of the pack's own depth, lon and lat, whatever --region says.
+
+--zero-noise scores a crps_graph_lam (members) checkpoint's z = 0 forecast: the GraphLAM its weights define with
+the FiLM noise off. Without it such a checkpoint is scored as one random member.
 """
 
 from __future__ import annotations
@@ -139,6 +142,16 @@ def summarize_fronts(rows: list[list[FrontDistance]]) -> dict:
     return out
 
 
+def noise_off(module) -> None:
+    """Turn a crps_graph_lam module's noise off, so its forecast is the deterministic z = 0 rollout."""
+    from hycom_emulator.ensemble import CRPSGraphLAM
+
+    predictor = module.forecaster.predictor
+    if not isinstance(predictor, CRPSGraphLAM):
+        raise ValueError(f"--zero-noise needs a crps_graph_lam checkpoint, not {type(predictor).__name__}")
+    predictor.noise_scale = 0.0
+
+
 def in_period(target_times_ns: np.ndarray, period: tuple[str, str] | None) -> bool:
     """True if the two initial days (the two days before the first target) and every target day lie in period."""
     if period is None:
@@ -149,10 +162,12 @@ def in_period(target_times_ns: np.ndarray, period: tuple[str, str] | None) -> bo
 
 
 def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | None = None, region_name: str = "gulf",
-             period: tuple[str, str] | None = None) -> dict:
+             period: tuple[str, str] | None = None, zero_noise: bool = False) -> dict:
     from hycom_emulator.evaluate_b00 import forecast, load
 
     ds, data, module = load(config, ckpt, split, ar_steps)
+    if zero_noise:
+        noise_off(module)
     meta = xr.open_zarr(pack_path(config) / "meta.zarr", consolidated=True).load()
     names = [str(n) for n in meta.state_feature.values]
     assert names == ds.get_vars_names("state"), "datastore and meta.zarr disagree on state features"
@@ -170,7 +185,8 @@ def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | N
         fronts["persistence"].append(front_distances(fg, truth, x0))
     return {
         "label": "free forecast given the true daily wind and boundary band (no increments, no observations after t0)",
-        "region": region_name, "period": list(period) if period else None, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt), "samples": len(indices),
+        "region": region_name, "period": list(period) if period else None, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt), "zero_noise": zero_noise,
+        "samples": len(indices),
         "fields": summarize(acc, names, level_weights(levels)),
         "fronts": {"isotach_ms": ISOTACH_MS, "region": "depth > 500 m, lon <= -81, lat >= 21.5", "statistic": "median over samples whose status is ok",
                    **{k: summarize_fronts(rows) for k, rows in fronts.items()}},
@@ -187,8 +203,9 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=None, help="score only the first n samples (smoke)")
     p.add_argument("--region", choices=("gulf", "interior"), default="gulf", help="interior: every ocean point outside the boundary band, as evaluate_b00 scores")
     p.add_argument("--period", nargs=2, metavar=("START", "END"), help="score only forecasts whose initial and target days lie in [START, END], e.g. one source experiment")
+    p.add_argument("--zero-noise", action="store_true", help="score a crps_graph_lam checkpoint's z = 0 forecast (noise off)")
     a = p.parse_args()
-    r = evaluate(a.config, a.ckpt, a.split, a.ar_steps, a.limit, a.region, tuple(a.period) if a.period else None)
+    r = evaluate(a.config, a.ckpt, a.split, a.ar_steps, a.limit, a.region, tuple(a.period) if a.period else None, a.zero_noise)
     a.out.write_text(json.dumps(r, indent=1))
     for name in (*LEVEL_VARS, "ssh"):
         row = " ".join(f"{lead}d {s['rmse_model'] / s['rmse_persistence']:.3f}" for lead, s in r["fields"][name].items())
