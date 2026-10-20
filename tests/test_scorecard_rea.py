@@ -25,3 +25,18 @@ def test_scorecard_finds_the_lead_where_kinetic_energy_collapses():
     assert np.isnan(rows["maxspeed"]["departs_test"])
     assert rows["geo_s15"]["usable_as_loss"] and not rows["geo_s50"]["usable_as_loss"]
     assert np.isnan(rows["geo_s15"]["departs_test"])
+
+
+def test_drift_band_is_the_truths_seven_day_change():
+    days = np.arange(np.datetime64("2024-01-01"), np.datetime64("2024-03-01"), 10).astype("datetime64[D]")
+    starts = [Start(d, i, 20) for i, d in enumerate(days)]
+    v = np.ones((len(starts), 20, len(STATS)))
+    names = list(STATS)
+    walk = np.cumsum(0.01 * np.random.default_rng(0).standard_normal((len(starts), 20)), 1)  # 1 cm/day steps
+    v[..., names.index("mean_ssh_truth")] = walk
+    v[..., names.index("mean_ssh_model")] = walk + 0.08
+    ds = to_dataset(starts, v, {})
+    rows = {r["diagnostic"]: r for r in scorecard(ds, "2024-01-01")}
+    half = float(rows["mean_ssh"]["band"].split("..")[1])
+    assert 0.02 < half < 0.035  # sqrt(7) cm
+    assert rows["mean_ssh"]["departs_test"] == 1

@@ -49,7 +49,8 @@ def diagnostics(ds: xr.Dataset) -> list[Diagnostic]:
          Diagnostic("maxspeed", "blur", RATIO_BAND, "median", ratio("maxspeed_model", "maxspeed_truth"))]
     d += [Diagnostic(f"spec_{ch}_{b}", "blur", RATIO_BAND, "median", ratio(f"spec_{ch}_{b}_ratio")) for ch in SPECTRA for b in BANDS]
     for ch in MEANS:
-        s = float(ds[f"mean_{ch}_truth"].diff("lead", 7).std())  # the truth's own 7-day change of the Gulf mean
+        truth = ds[f"mean_{ch}_truth"]
+        s = float((truth - truth.shift(lead=7)).std())  # the truth's own 7-day change of the Gulf mean
         d.append(Diagnostic(f"mean_{ch}", "drift", (-s, s), "median",
                             lambda x, ch=ch: x[f"mean_{ch}_model"] - x[f"mean_{ch}_truth"]))
     d += [Diagnostic("lc_area", "eddies", RATIO_BAND, "median", ratio("lc_area_model", "lc_area_truth")),
