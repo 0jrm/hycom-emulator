@@ -14,7 +14,9 @@ while kill -0 "$pid" 2>/dev/null; do
   rss=$(ps -o rss= --sid "$pid" | awk '{s+=$1} END{print int(s/1024)}')
   [ "$rss" -gt "$peak" ] && peak=$rss
   if [ "$used" -gt "$HOST_GB" ] || [ "$rss" -gt $((RSS_GB * 1024)) ]; then
-    kill -- -"$pid"
+    pkill -TERM -s "$pid"  # the session, not the process group: timeout(1) moves its child to a group of its own
+    sleep "${GRACE_S:-30}"
+    pkill -KILL -s "$pid"
     echo "$(date -Is) mem_guard killed $* at host $used GB, rss $rss MB" >> "$LOG"
     exit 1
   fi
