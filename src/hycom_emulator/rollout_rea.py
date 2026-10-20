@@ -41,6 +41,7 @@ import xarray as xr
 from scipy import ndimage
 
 import hycom_emulator.ensemble  # noqa: F401  registers crps_graph_lam, so a free run can load an ensemble checkpoint
+from hycom_emulator import operators as op
 from hycom_emulator.evaluate_rea import LEVEL_VARS, level_weights, point_weights
 
 LABEL = ("regional free run: true boundary band (neural-lam overwrites it with truth every step) and true daily wind; "
@@ -99,6 +100,7 @@ class Geometry:
     region: torch.Tensor  # (grid,) bool
     area_sum: float  # sum of area over region
     plane: Plane | None = None  # 2D diagnostics (spectra, Loop Current); load_model sets it
+    ops: op.OpGrid | None = None  # operator diagnostics; load_model sets it
 
 
 @dataclass(frozen=True)
@@ -254,6 +256,67 @@ def lc(s: Step, g: Geometry, which: str, item: int):
     return v[:, item]
 
 
+def _images(x: torch.Tensor, g: Geometry, chans: list[str]) -> torch.Tensor:
+    """(B, grid, feature) -> (B, len(chans), ny, nx) float64, the plane's orientation."""
+    nx, ny = g.plane.shape
+    cols = [g.names.index(c) for c in chans]
+    return x[..., cols].double().reshape(x.shape[0], nx, ny, len(cols)).permute(0, 3, 2, 1)
+
+
+def _depth_name(z: float) -> str:
+    return f"{z:g}m"
+
+
+def operator_values(s: Step, g: Geometry, which: str) -> dict:
+    """Scalars (vorticity and divergence RMS, inversion share) and Ties of the model or truth state, per scale."""
+    def compute():
+        o = g.ops
+        x, prev = getattr(s, which), getattr(s, f"{which}_prev")
+        one = lambda a, c: _images(a, g, [c])[:, 0]  # noqa: E731
+        lev = lambda z: o.ocean[o.levels.index(z)]  # noqa: E731
+        out = {}
+        for sc in op.SCALES_KM:
+            for z in op.VORTICITY_DEPTHS:
+                u, v = one(x, f"u_{_depth_name(z)}"), one(x, f"v_{_depth_name(z)}")
+                zeta, ok = op.vorticity(u, v, lev(z), o, sc)
+                out[f"zeta_{_depth_name(z)}_{sc}"] = op.rms(zeta / o.f, ok, o.region)
+            div, ok = op.divergence(one(x, "u_0m"), one(x, "v_0m"), lev(0.0), o, sc)
+            out[f"div_0m_{sc}"] = op.rms(div / o.f, ok, o.region)
+            out[f"geo_{sc}"] = op.geostrophic(one(x, "u_0m"), one(x, "v_0m"), one(x, "ssh"), lev(0.0), o, sc)
+            for z1, z2 in op.SHEAR_PAIRS:
+                a, b = _depth_name(z1), _depth_name(z2)
+                out[f"tw_{a}_{b}_{sc}"] = op.thermal_wind(
+                    one(x, f"u_{a}"), one(x, f"v_{a}"), one(x, f"temp_{a}"), one(x, f"salin_{a}"),
+                    one(x, f"u_{b}"), one(x, f"v_{b}"), one(x, f"temp_{b}"), one(x, f"salin_{b}"), z1, z2,
+                    lev(z1) & lev(z2), o, sc)
+            out[f"cont_{sc}"] = op.continuity(one(x, "ssh"), one(prev, "ssh"), one(x, "ubaro"), one(x, "vbaro"),
+                                              one(prev, "ubaro"), one(prev, "vbaro"), lev(0.0), o, sc)
+        zs = [_depth_name(z) for z in o.levels]
+        out["inversions"] = op.inversion_fraction(_images(x, g, [f"temp_{z}" for z in zs]),
+                                                  _images(x, g, [f"salin_{z}" for z in zs]), o)
+        return out
+    return _cached(s, ("ops", which), compute)
+
+
+def operator_scalar(s: Step, g: Geometry, key: str, which: str):
+    return operator_values(s, g, which)[key]
+
+
+def tie_stat(s: Step, g: Geometry, key: str, which: str, part: str):
+    """part: residual or lhs RMS of the model or truth; error: RMS of model minus truth residual."""
+    if part == "error":
+        a, b = operator_values(s, g, "pred")[key], operator_values(s, g, "truth")[key]
+        return op.rms(a.residual - b.residual, a.ok & b.ok, g.ops.region)
+    t = operator_values(s, g, which)[key]
+    return op.rms(t.residual if part == "residual" else t.lhs, t.ok, g.ops.region)
+
+
+TIES = {"geo": ("m/s", "surface velocity minus geostrophic velocity of SSH"),
+        **{f"tw_{_depth_name(a)}_{_depth_name(b)}": ("1/s", f"shear {a:g}-{b:g} m minus thermal wind of sigma2")
+           for a, b in op.SHEAR_PAIRS},
+        "cont": ("m/s", "1-day SSH change minus convergence of depth x barotropic velocity")}
+
+
 class Stat(NamedTuple):
     fn: Callable  # (Step, Geometry) -> (B,) tensor
     units: str
@@ -287,6 +350,25 @@ def _registry() -> dict[str, Stat]:
             if key == "north" or which != "error":
                 st[f"lc_{key}_{who}"] = Stat(p(lc, which=which, item=item), units,
                                              f"Loop Current {what} from the 17 cm contour (probe7), {who if who != 'error' else 'model minus truth'}")
+    for sc, km in op.SCALES_KM.items():
+        for which, who in (("pred", "model"), ("truth", "truth")):
+            for z in op.VORTICITY_DEPTHS:
+                key = f"zeta_{_depth_name(z)}_{sc}"
+                st[f"op_{key}_{who}"] = Stat(p(operator_scalar, key=key, which=which), "1",
+                                             f"RMS relative vorticity / f at {z:g} m, Gaussian sigma {km:g} km, {who}")
+            st[f"op_div_0m_{sc}_{who}"] = Stat(p(operator_scalar, key=f"div_0m_{sc}", which=which), "1",
+                                               f"RMS divergence / f at 0 m, Gaussian sigma {km:g} km, {who}")
+            for tie, (units, what) in TIES.items():
+                for part, label in (("residual", "residual"), ("lhs", "lhs")):
+                    st[f"op_{tie}_{sc}_{part}_{who}"] = Stat(p(tie_stat, key=f"{tie}_{sc}", which=which, part=part), units,
+                                                             f"RMS {label} of {what}, Gaussian sigma {km:g} km, {who}")
+        for tie, (units, what) in TIES.items():
+            st[f"op_{tie}_{sc}_error"] = Stat(p(tie_stat, key=f"{tie}_{sc}", which="pred", part="error"), units,
+                                              f"RMS of model minus true residual of {what}, Gaussian sigma {km:g} km")
+    for which, who in (("pred", "model"), ("truth", "truth")):
+        st[f"op_inversions_{who}"] = Stat(p(operator_scalar, key="inversions", which=which), "1",
+                                          f"share of Gulf adjacent real level pairs where sigma2 falls downward by over "
+                                          f"{op.INVERSION_TOL} kg/m3, {who}")
     return st
 
 
@@ -413,7 +495,10 @@ def load_model(config: Path, ckpt: Path) -> Model:
     st = lambda f: static.sel(static_feature=f).values  # noqa: E731
     masks = {"ssh": region, "temp_100m": region & level_ocean[:, int(np.argmin(np.abs(levels - 100)))]}
     pl = plane(shape, st("lon"), st("lat"), st("depth"), st("gulf").astype(bool), masks, int(meta.attrs["stride"]), module.device)
-    geo = replace(geometry(names, area, region, level_ocean, levels, module.device), plane=pl)
+    img = lambda v: v.reshape(shape).T  # noqa: E731
+    ops = op.op_grid(img(st("lon")), img(st("lat")), img(st("depth")), np.stack([img(c) for c in level_ocean.T]), levels,
+                     img(region), device=module.device)
+    geo = replace(geometry(names, area, region, level_ocean, levels, module.device), plane=pl, ops=ops)
     window = functools.cache(lambda n: WeatherDataset(ds, split="train", ar_steps=n, num_past_forcing_steps=1, num_future_forcing_steps=1))
     return Model(module, window, ds.get_dataarray("state", "train").time.values, geo, meta, shape, ds)
 

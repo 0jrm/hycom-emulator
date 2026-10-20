@@ -6,25 +6,28 @@ import torch
 from scipy import ndimage
 
 from hycom_emulator.evaluate_rea import level_weights, point_weights
+from hycom_emulator.operators import op_grid
 from hycom_emulator.rollout_rea import (
-    BANDS, STATS, Start, Step, band_variance, done, finalize, geometry, loop_current, max_horizon, plane, rollout_stats,
+    BANDS, STATS, Start, Step, _images, band_variance, done, finalize, geometry, loop_current, max_horizon, plane, rollout_stats,
     start_set, to_dataset, unroll, window_index, write_part,
 )
 
-LEVELS = np.array([0.0, 10.0, 100.0])
+LEVELS = np.array([0.0, 10.0, 100.0, 200.0, 500.0])
 NAMES = [f"{v}_{d:g}m" for v in ("temp", "salin", "u", "v") for d in LEVELS] + ["ssh", "ubaro", "vbaro"]
 G, F = 20, len(NAMES)
 
 
 def _geo(rng):
-    level_ocean = np.ones((G, 3), bool)
-    level_ocean[:4, 2] = False
+    level_ocean = np.ones((G, len(LEVELS)), bool)
+    level_ocean[:4, 2:] = False
     region = np.ones(G, bool)
     region[-3:] = False
     area = rng.uniform(0.5, 1.0, G)
-    pl = plane((5, 4), np.linspace(-90, -85, G), np.linspace(22, 26, G), np.full(G, 1000.0), np.ones(G, bool),
-               {"ssh": region, "temp_100m": region & level_ocean[:, 2]}, 2)
-    return replace(geometry(NAMES, area, region, level_ocean, LEVELS), plane=pl), area, region, level_ocean
+    lon, lat = np.linspace(-90, -85, G), np.linspace(22, 26, G)
+    pl = plane((5, 4), lon, lat, np.full(G, 1000.0), np.ones(G, bool), {"ssh": region, "temp_100m": region & level_ocean[:, 2]}, 2)
+    img = lambda v: v.reshape(5, 4).T  # noqa: E731
+    ops = op_grid(img(lon), img(lat), np.full((4, 5), 1000.0), np.stack([img(c) for c in level_ocean.T]), LEVELS, img(region))
+    return replace(geometry(NAMES, area, region, level_ocean, LEVELS), plane=pl, ops=ops), area, region, level_ocean
 
 
 def _step(rng, **over):
@@ -300,3 +303,10 @@ def test_movie_channels_resolve_features_and_speed():
     assert groups == [[3], [1, 2], [0]]
     x = np.array([[20.0, 3.0, 4.0, 0.5]])
     np.testing.assert_allclose(movie_values(x, groups), [[0.5, 5.0, 20.0]])
+
+
+def test_operator_images_follow_the_plane_orientation():
+    geo, *_ = _geo(np.random.default_rng(0))
+    x = torch.randn(2, G, F)
+    c = NAMES.index("ssh")
+    assert torch.equal(_images(x, geo, ["ssh"])[1, 0], x[1, :, c].double().reshape(5, 4).T)
