@@ -42,7 +42,8 @@ from scipy import ndimage
 
 import hycom_emulator.ensemble  # noqa: F401  registers crps_graph_lam, so a free run can load an ensemble checkpoint
 from hycom_emulator import operators as op
-from hycom_emulator.evaluate_rea import LEVEL_VARS, level_weights, point_weights
+from hycom_emulator.evaluate_rea import LEVEL_VARS, FrontGrid, front_grid, level_weights, point_weights, speed_0m
+from hycom_emulator.isotach import front_distance
 
 LABEL = ("regional free run: true boundary band (neural-lam overwrites it with truth every step) and true daily wind; "
          "no truth enters the interior after t0")
@@ -101,6 +102,7 @@ class Geometry:
     area_sum: float  # sum of area over region
     plane: Plane | None = None  # 2D diagnostics (spectra, Loop Current); load_model sets it
     ops: op.OpGrid | None = None  # operator diagnostics; load_model sets it
+    front: FrontGrid | None = None  # 1.5 kt isotach front; load_model sets it
 
 
 @dataclass(frozen=True)
@@ -311,6 +313,16 @@ def tie_stat(s: Step, g: Geometry, key: str, which: str, part: str):
     return op.rms(t.residual if part == "residual" else t.lhs, t.ok, g.ops.region)
 
 
+def front(s: Step, g: Geometry, ref: str, key: str):
+    """Distance (km) between the 1.5 kt surface isotach of the model (ref pred) or persistence (ref x0) and the
+    truth's, as evaluate_rea scores it; nan when either front is empty."""
+    def compute():
+        truth, other = s.truth.cpu().numpy(), getattr(s, ref).cpu().numpy()
+        return [front_distance(speed_0m(a, g.front), speed_0m(b, g.front), g.front.region, g.front.cell_km)
+                for a, b in zip(other, truth)]
+    return torch.tensor([getattr(d, key) for d in _cached(s, ("front", ref), compute)], dtype=torch.float64, device=s.pred.device)
+
+
 TIES = {"geo": ("m/s", "surface velocity minus geostrophic velocity of SSH"),
         **{f"tw_{_depth_name(a)}_{_depth_name(b)}": ("1/s", f"shear {a:g}-{b:g} m minus thermal wind of sigma2")
            for a, b in op.SHEAR_PAIRS},
@@ -365,6 +377,10 @@ def _registry() -> dict[str, Stat]:
         for tie, (units, what) in TIES.items():
             st[f"op_{tie}_{sc}_error"] = Stat(p(tie_stat, key=f"{tie}_{sc}", which="pred", part="error"), units,
                                               f"RMS of model minus true residual of {what}, Gaussian sigma {km:g} km")
+    for key in ("mean_km", "hausdorff_km"):
+        for ref, who in (("pred", "model"), ("x0", "pers")):
+            st[f"front_{key}_{who}"] = Stat(p(front, ref=ref, key=key), "km",
+                                            f"1.5 kt surface isotach {key[:-3]} distance to the truth's, {who}")
     for which, who in (("pred", "model"), ("truth", "truth")):
         st[f"op_inversions_{who}"] = Stat(p(operator_scalar, key="inversions", which=which), "1",
                                           f"share of Gulf adjacent real level pairs where sigma2 falls downward by over "
@@ -498,7 +514,8 @@ def load_model(config: Path, ckpt: Path) -> Model:
     img = lambda v: v.reshape(shape).T  # noqa: E731
     ops = op.op_grid(img(st("lon")), img(st("lat")), img(st("depth")), np.stack([img(c) for c in level_ocean.T]), levels,
                      img(region), device=module.device)
-    geo = replace(geometry(names, area, region, level_ocean, levels, module.device), plane=pl, ops=ops)
+    geo = replace(geometry(names, area, region, level_ocean, levels, module.device), plane=pl, ops=ops,
+                  front=front_grid(meta, names))
     window = functools.cache(lambda n: WeatherDataset(ds, split="train", ar_steps=n, num_past_forcing_steps=1, num_future_forcing_steps=1))
     return Model(module, window, ds.get_dataarray("state", "train").time.values, geo, meta, shape, ds)
 

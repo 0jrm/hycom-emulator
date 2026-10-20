@@ -5,7 +5,7 @@ import pytest
 import torch
 from scipy import ndimage
 
-from hycom_emulator.evaluate_rea import level_weights, point_weights
+from hycom_emulator.evaluate_rea import FrontGrid, level_weights, point_weights
 from hycom_emulator.operators import op_grid
 from hycom_emulator.rollout_rea import (
     BANDS, STATS, Start, Step, _images, band_variance, done, finalize, geometry, loop_current, max_horizon, plane, rollout_stats,
@@ -27,7 +27,8 @@ def _geo(rng):
     pl = plane((5, 4), lon, lat, np.full(G, 1000.0), np.ones(G, bool), {"ssh": region, "temp_100m": region & level_ocean[:, 2]}, 2)
     img = lambda v: v.reshape(5, 4).T  # noqa: E731
     ops = op_grid(img(lon), img(lat), np.full((4, 5), 1000.0), np.stack([img(c) for c in level_ocean.T]), LEVELS, img(region))
-    return replace(geometry(NAMES, area, region, level_ocean, LEVELS), plane=pl, ops=ops), area, region, level_ocean
+    fg = FrontGrid(NAMES.index("u_0m"), NAMES.index("v_0m"), (4, 5), img(region), np.full((4, 5), 9.0))
+    return replace(geometry(NAMES, area, region, level_ocean, LEVELS), plane=pl, ops=ops, front=fg), area, region, level_ocean
 
 
 def _step(rng, **over):
@@ -151,7 +152,7 @@ def test_rollout_stats_are_nan_beyond_the_horizon(record):
     geo, *_ = _geo(np.random.default_rng(1))
     v = rollout_stats(module, window, times, starts, 4, geo)
     assert v.shape == (2, 20, len(STATS))
-    always = [i for i, k in enumerate(STATS) if not (k.startswith("lc_north") or k.endswith("km_ratio"))]  # toy grid: no LC, bands empty
+    always = [i for i, k in enumerate(STATS) if not (k.startswith(("lc_north", "front_")) or k.endswith("km_ratio"))]  # toy grid: no LC or front, bands empty
     assert np.isfinite(v[0][:, always]).all() and np.isfinite(v[1, :starts[1].horizon][:, always]).all()
     assert np.isnan(v[1, starts[1].horizon:]).all()
 

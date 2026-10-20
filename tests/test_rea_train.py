@@ -202,3 +202,9 @@ def test_install_compiles_the_predictor_in_place(monkeypatch):
     monkeypatch.setattr(tm, "ForecasterModule", tm.ForecasterModule)
     rea_train.install(Options(compile=True), ["--config_path", "n.yaml"])
     assert isinstance(tm.build_predictor(), Pred) and built == ["compiled"]
+
+
+def test_stability_flag_needs_rea_wmse():
+    assert split_args(["--loss", "rea_wmse", "--mean_penalty", "0", "--stability", "0.5"])[0].stability == 0.5
+    with pytest.raises(SystemExit):
+        split_args(["--stability", "0.5"])

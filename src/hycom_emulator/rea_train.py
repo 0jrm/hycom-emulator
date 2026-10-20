@@ -1,9 +1,9 @@
 """Arm switches for reanalysis-emulator training: our flags, taken off train_model's arguments before neural-lam parses them.
 
     python -m hycom_emulator.nlam train_model --config_path nlam.yaml ... --loss rea_wmse --mean_penalty 0.0016 \\
-        --mean_scales truth_series.npz [--amse 0.1] [--pushforward 1] [--input_noise 0.1] [--checkpoint_steps] [--log_domain_means]
+        --mean_scales truth_series.npz [--amse 0.1] [--stability 0.01] [--pushforward 1] [--input_noise 0.1] [--checkpoint_steps] [--log_domain_means]
 
-- --mean_penalty, --mean_scales, --amse: the weights of rea_loss.rea_wmse (needs --loss rea_wmse; --mean_penalty 0
+- --mean_penalty, --mean_scales, --amse, --stability: the weights of rea_loss.rea_wmse (needs --loss rea_wmse; --mean_penalty 0
   is the control). --mean_scales is a `conservation series` npz; its train rows give the scales.
 - --pushforward K: the first K rollout steps run without gradient (Brandstetter et al. 2022), so step K learns from a
   state the model made itself instead of backpropagating through the whole chain.
@@ -66,6 +66,7 @@ class Options:
     plateau: tuple[int, int] | None = None
     plateau_threshold: float = 0.005
     lr_decay: float = 0.5
+    stability: float = 0.0
 
 
 def _value(argv: list[str], flag: str, default: str | None = None) -> str | None:
@@ -80,6 +81,7 @@ def split_args(argv: list[str]) -> tuple[Options, list[str]]:
     p.add_argument("--mean_penalty", type=float)
     p.add_argument("--mean_scales", type=Path)
     p.add_argument("--amse", type=float, default=0.0)
+    p.add_argument("--stability", type=float, default=0.0)
     p.add_argument("--pushforward", type=int, default=0)
     p.add_argument("--input_noise", type=float, default=0.0)
     p.add_argument("--checkpoint_steps", action="store_true")
@@ -95,13 +97,13 @@ def split_args(argv: list[str]) -> tuple[Options, list[str]]:
     rea = _value(rest, "--loss", "wmse") == "rea_wmse"
     if rea and opts.mean_penalty is None:
         p.error("--loss rea_wmse needs --mean_penalty (0 for the control)")
-    if not rea and (opts.mean_penalty is not None or opts.amse):
-        p.error("--mean_penalty and --amse need --loss rea_wmse")
+    if not rea and (opts.mean_penalty is not None or opts.amse or opts.stability):
+        p.error("--mean_penalty, --amse and --stability need --loss rea_wmse")
     if opts.mean_penalty and opts.mean_scales is None:
         p.error("--mean_penalty > 0 needs --mean_scales")
     if opts.log_domain_means and (_value(rest, "--model", "graph_lam") == "crps_graph_lam" or _value(rest, "--loss") == "wcrps_gauss"):
         p.error("--log_domain_means replaces ForecasterModule, which the crps and Gaussian-head arms also replace")
-    if min(opts.mean_penalty or 0.0, opts.amse, opts.pushforward, opts.input_noise) < 0:
+    if min(opts.mean_penalty or 0.0, opts.amse, opts.stability, opts.pushforward, opts.input_noise) < 0:
         p.error("weights, --pushforward and --input_noise are >= 0")
     if opts.train_first_step and not opts.pushforward:
         p.error("--train_first_step needs --pushforward")
@@ -119,14 +121,15 @@ def install(opts: Options, rest: list[str]) -> None:
     if _value(rest, "--loss", "wmse") == "rea_wmse":
         _, ds = load_config_and_datastore(config_path=_value(rest, "--config_path"))
         means = inv_scale = None
-        on.append(f"rea_wmse mean_penalty {opts.mean_penalty:g} amse {opts.amse:g}")
+        on.append(f"rea_wmse mean_penalty {opts.mean_penalty:g} amse {opts.amse:g} stability {opts.stability:g}")
         if opts.mean_penalty:
             means = rea_loss.DomainMeans.from_meta(ds.meta)
             scales = rea_loss.scales_from_series(opts.mean_scales, ds.config["splits"]["train"][1])
             inv_scale = 1.0 / scales
             on[-1] += " (scales " + " ".join(f"{q} {s:.3g}" for q, s in zip(means.names, scales)) + ")"
         shape = ds.grid_shape_state
-        rea_loss.configure(means, inv_scale, opts.mean_penalty, opts.amse, (shape.x, shape.y))
+        stability = rea_loss.Stability.from_meta(ds.meta) if opts.stability else None
+        rea_loss.configure(means, inv_scale, opts.mean_penalty, opts.amse, (shape.x, shape.y), stability, opts.stability)
     if opts.pushforward or opts.input_noise or opts.checkpoint_steps:
         tm.ARForecaster = functools.partial(ReaForecaster, pushforward=opts.pushforward, input_noise=opts.input_noise,
                                             checkpoint_steps=opts.checkpoint_steps, train_first_step=opts.train_first_step)

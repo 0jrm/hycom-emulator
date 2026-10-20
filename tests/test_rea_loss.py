@@ -9,7 +9,8 @@ from neural_lam import metrics
 from hycom_emulator import rea_loss
 from hycom_emulator.conservation import apply, functionals
 from hycom_emulator.evaluate_rea import cell_area, regions
-from hycom_emulator.rea_loss import QUANTITIES, DomainMeans, _bands, amse_excess, rea_wmse, scales_from_series
+from hycom_emulator.physics import sigma2
+from hycom_emulator.rea_loss import INVERSION_SCALE, QUANTITIES, DomainMeans, Stability, _bands, amse_excess, rea_wmse, scales_from_series
 
 LEVELS = np.array([0.0, 10.0, 100.0, 2000.0])
 NAMES = [f"{v}_{d:g}m" for v in ("temp", "salin", "u", "v") for d in LEVELS] + ["ssh", "ubaro", "vbaro"]
@@ -226,3 +227,62 @@ def test_amse_zero_is_exactly_wmse_and_float32_gradients_flow():
     loss = rea_wmse(pred, target, pred_std, mask=mask)
     loss.mean().backward()
     assert loss.dtype == torch.float32 and torch.isfinite(pred.grad).all()
+
+
+def _standardized(meta, phys):
+    return torch.tensor((phys - meta.state_mean.values) / meta.state_std.values, dtype=torch.float32)
+
+
+def _column(meta, temp_by_level):
+    """(grid, feature) physical state: temp per level as given, salinity 36 everywhere, velocities 0."""
+    x = np.zeros((N, F))
+    for z, t in zip(LEVELS, temp_by_level):
+        x[:, NAMES.index(f"temp_{z:g}m")] = t
+        x[:, NAMES.index(f"salin_{z:g}m")] = 36.0
+    return x
+
+
+def test_stability_is_zero_for_a_stable_column_and_counts_one_inverted_pair():
+    meta = _meta(np.random.default_rng(0))
+    st = Stability.from_meta(meta)
+    assert st.penalty(_standardized(meta, _column(meta, [25, 20, 15, 5]))) == pytest.approx(0.0, abs=1e-9)
+    x = _column(meta, [25, 20, 15, 5])
+    pair = 1  # 10 m over 100 m
+    ok = st.pairs[:, pair].numpy().astype(bool)
+    i = int(np.flatnonzero(ok)[0])
+    x[i, NAMES.index("temp_100m")] = 20.5
+    rho = lambda t: sigma2(torch.tensor(t, dtype=torch.float64), torch.tensor(36.0, dtype=torch.float64)).item()  # noqa: E731
+    want = ((rho(20.0) - rho(20.5)) / INVERSION_SCALE) ** 2 / st.pairs.sum().item()
+    assert st.penalty(_standardized(meta, x)).item() == pytest.approx(want, rel=1e-3)
+
+
+def test_stability_ignores_the_band_land_and_the_sea_floor():
+    meta = _meta(np.random.default_rng(0))
+    st = Stability.from_meta(meta)
+    interior = regions(meta)["interior"]
+    real = meta.level_ocean.values.astype(bool)
+    want = real[:, 1:] & real[:, :-1] & interior[:, None]
+    assert np.array_equal(st.pairs.numpy().astype(bool), want)
+    x = _column(meta, [25, 20, 15, 5])
+    off = ~want[:, 2]
+    x[off, NAMES.index("temp_2000m")] = 30.0
+    assert st.penalty(_standardized(meta, x)) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_stability_weight_zero_is_wmse_and_its_gradient_flows():
+    rng = np.random.default_rng(3)
+    meta = _meta(rng)
+    pred, target, pred_std = _batch(rng)
+    rea_loss.configure(None, None, 0.0, stability=Stability.from_meta(meta), stability_weight=0.0)
+    assert torch.equal(rea_wmse(pred, target, pred_std), metrics.wmse(pred, target, pred_std))
+    rea_loss.configure(None, None, 0.0, stability=Stability.from_meta(meta), stability_weight=2.0)
+    p = pred.clone().requires_grad_()
+    loss = rea_wmse(p, target, pred_std)
+    assert (loss > metrics.wmse(pred, target, pred_std)).all()
+    loss.sum().backward()
+    assert torch.isfinite(p.grad).all()
+
+
+def test_stability_weight_without_columns_is_refused():
+    with pytest.raises(ValueError, match="stability"):
+        rea_loss.configure(None, None, 0.0, stability_weight=1.0)
