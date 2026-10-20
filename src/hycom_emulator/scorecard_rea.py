@@ -26,6 +26,7 @@ from hycom_emulator.rollout_rea import BANDS, MEANS, SPECTRA, TIES
 RATIO_BAND = (0.9, 1.1)
 INVERSION_BAND = (0.5, 2.0)
 COUNT_BAND = (0.67, 1.5)
+FRONT_BAND = (0.0, 1.0)  # model front distance over persistence's: departs when the front is placed no better than persistence
 RUN = 3  # leads outside the band in a row
 TRUTH_RESIDUAL_MAX = 0.5
 REPORT_LEADS = (1, 4, 7, 10, 14, 21, 30, 45, 60)
@@ -53,7 +54,8 @@ def diagnostics(ds: xr.Dataset) -> list[Diagnostic]:
         s = float((truth - truth.shift(lead=7)).std())  # the truth's own 7-day change of the Gulf mean
         d.append(Diagnostic(f"mean_{ch}", "drift", (-s, s), "median",
                             lambda x, ch=ch: x[f"mean_{ch}_model"] - x[f"mean_{ch}_truth"]))
-    d += [Diagnostic("lc_area", "eddies", RATIO_BAND, "median", ratio("lc_area_model", "lc_area_truth")),
+    d += [Diagnostic("front_vs_persistence", "eddies", FRONT_BAND, "median", ratio("front_mean_km_model", "front_mean_km_pers")),
+          Diagnostic("lc_area", "eddies", RATIO_BAND, "median", ratio("lc_area_model", "lc_area_truth")),
           Diagnostic("lc_lce", "eddies", COUNT_BAND, "mean", ratio("lc_lce_model", "lc_lce_truth"))]
     for sc in op.SCALES_KM:
         for k in [f"zeta_{z:g}m_{sc}" for z in op.VORTICITY_DEPTHS] + [f"div_0m_{sc}"]:
