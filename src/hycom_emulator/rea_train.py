@@ -23,7 +23,7 @@
 Each switch is off by default and changes no weights, so checkpoints load with or without them.
 
     python -m hycom_emulator.rea_train probe --config_path nlam.yaml --load <ckpt> --ar_steps_train 4 --batch_size 4 \\
-        --steps 10 [--num_workers 8] [--loss rea_wmse ...] [arm flags]
+        --steps 10 [--num_workers 8] [--seed 0] [--loss rea_wmse ...] [arm flags]
 
 `probe` builds the model train_model would build for these flags, loads the checkpoint's weights and takes `steps`
 optimizer steps on train batches. It prints one JSON line: peak GPU memory (GiB; null on CPU), the median time per
@@ -317,6 +317,7 @@ def probe(argv: list[str]) -> int:
     p.add_argument("--steps", type=int, required=True)
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--loss", default="wmse")
+    p.add_argument("--seed", type=int, help="seed the batch order, so two probes with different loss flags see the same batches")
     a = p.parse_args(rest)
     install(opts, rest)
 
@@ -333,7 +334,8 @@ def probe(argv: list[str]) -> int:
     opt = module.configure_optimizers()
     data = WeatherDataset(ds, split="train", ar_steps=a.ar_steps_train, num_past_forcing_steps=args.num_past_forcing_steps,
                           num_future_forcing_steps=args.num_future_forcing_steps)
-    loader = torch.utils.data.DataLoader(data, batch_size=a.batch_size, shuffle=True, num_workers=a.num_workers,
+    gen = None if a.seed is None else torch.Generator().manual_seed(a.seed)
+    loader = torch.utils.data.DataLoader(data, batch_size=a.batch_size, shuffle=True, num_workers=a.num_workers, generator=gen,
                                          multiprocessing_context="fork" if a.num_workers else None, pin_memory=device.type == "cuda")
 
     def sync():
