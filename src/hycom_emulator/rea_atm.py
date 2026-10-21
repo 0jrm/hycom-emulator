@@ -36,6 +36,7 @@ TARBALLS = {"cfsr": Path("/hycom/ftp/pub/GitHub/HYCOM-examples/datasets/CFSR_GOM
 FOLDERS = {"cfsr": "CFSR_GOM", "cfsv2": "CFSv2_GOM"}
 FILES = {"Taqa": "sea", "dswsfc": "sec", "dlwsfc": "sec", "precip": "sea", "sfcprs": "sec", "uv-10m": "sec2"}
 CHANNELS = ("airtmp", "vapmix", "dswflx", "dlwflx", "precip", "sfcprs")
+ALIASES = {"airprs": "sfcprs"}  # the sfcprs files name their variable airprs
 WIND = ("wndewd", "wndnwd")
 PACK_WIND = ("wnd_ewd", "wnd_nwd")
 WINDOWS = {"a": np.ones(24), "b": np.where(np.arange(24) == 12, 1.84, 1.0)}
@@ -188,15 +189,16 @@ def build(pack: Path, tmp: Path, out: Path, years: list[int]) -> None:
             path = hourly_path(tmp, y, tag)
             names = data_vars(xr.open_dataset(path))
             for v in names:
-                if v not in CHANNELS:
+                ch = ALIASES.get(v, v)
+                if ch not in CHANNELS:
                     raise KeyError(f"{path.name} holds {v}, not one of {CHANNELS}")
                 f, ds = daily(path, v, pk.dates[r], window)
                 interp = Bilinear.make(ds.Latitude.values, ds.Longitude.values, pk.lat, pk.lon)
                 vals, u = interp(f), ds[v].attrs.get("units", "")
-                if v == "airtmp" and u.strip().lower() in ("k", "kelvin", "degk"):
+                if ch == "airtmp" and u.strip().lower() in ("k", "kelvin", "degk"):
                     vals, u = vals - 273.15, "degC"
-                atm[r, :, CHANNELS.index(v)] = vals
-                files[v], units[v] = path.name, u
+                atm[r, :, CHANNELS.index(ch)] = vals
+                files[ch], units[ch] = f"{path.name}:{v}", u
         if set(files) != set(CHANNELS):
             raise KeyError(f"{y}: built {sorted(files)}, expected {CHANNELS}")
         meta["years"][str(y)] = {"product": product(y), "files": files}
