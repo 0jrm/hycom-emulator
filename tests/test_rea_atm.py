@@ -51,3 +51,41 @@ def test_years_arg_takes_lists_and_ranges():
     from hycom_emulator.rea_atm import years_arg
     assert years_arg("2001,2010-2012") == [2001, 2010, 2011, 2012]
     assert years_arg("2000-2002") == [2000, 2001, 2002]
+
+
+def test_pack_appends_the_atm_channels_and_their_statistics(tmp_path):
+    import json
+    import os
+
+    from hycom_emulator import rea_atm
+    from hycom_emulator.datastore import _open
+
+    T, G = 4, 6
+    base, atm, out = tmp_path / "base", tmp_path / "atm", tmp_path / "overlay"
+    base.mkdir(), atm.mkdir()
+    rng = np.random.default_rng(0)
+    f0 = rng.normal(size=(T, G, 2)).astype(np.float32)
+    a = rng.normal(size=(T, G, len(rea_atm.CHANNELS))).astype(np.float32)
+    np.save(base / "forcing.npy", f0)
+    np.save(base / "state.npy", rng.normal(size=(T, G, 3)).astype(np.float32))
+    np.save(atm / "atm.npy", a)
+    for name in ("written.npy",):
+        np.save(base / name, np.ones(T, bool))
+    np.savez(base / "grid.npz", x=np.arange(G))
+    (base / "plan.json").write_text("{}")
+    xr.Dataset({"forcing_mean": ("forcing_feature", [0.1, 0.2]), "forcing_std": ("forcing_feature", [1.0, 2.0]),
+                "state_mean": ("state_feature", np.zeros(3))},
+               coords={"forcing_feature": ["wnd_ewd", "wnd_nwd"], "forcing_feature_units": ("forcing_feature", ["m/s", "m/s"]),
+                       "state_feature": ["a", "b", "c"], "time": np.arange(T).astype("datetime64[D]")}).to_zarr(base / "meta.zarr", consolidated=True)
+    stats = {c: float(i) for i, c in enumerate(rea_atm.CHANNELS)}
+    (atm / "meta.json").write_text(json.dumps({"channels": list(rea_atm.CHANNELS), "units": {c: "u" for c in rea_atm.CHANNELS},
+                                               "train_mean": stats, "train_std": {c: v + 1 for c, v in stats.items()}}))
+    rea_atm.pack(base, atm, out)
+    os.symlink(base / "state.npy", out / "state.npy")
+    ds = _open(out)
+    assert ds.sizes["forcing_feature"] == 2 + len(rea_atm.CHANNELS)
+    assert list(ds.forcing_feature.values) == ["wnd_ewd", "wnd_nwd", *rea_atm.CHANNELS]
+    assert np.array_equal(ds["forcing"].values[..., :2], f0) and np.array_equal(ds["forcing"].values[..., 2:], a)
+    assert np.allclose(ds.forcing_mean.values, [0.1, 0.2, *stats.values()])
+    assert np.allclose(ds.forcing_std.values, [1.0, 2.0, *(v + 1 for v in stats.values())])
+    assert ds.sizes["state_feature"] == 3

@@ -4,11 +4,15 @@
     python -m hycom_emulator.rea_atm wind <pack> <tmp_dir> <out_dir> [--years 2001-2024]
     python -m hycom_emulator.rea_atm build <pack> <tmp_dir> <out_dir> [--years 2001-2024]
     python -m hycom_emulator.rea_atm check <pack> <out_dir>
+    python -m hycom_emulator.rea_atm pack <pack> <out_dir> <overlay>
 
 `extract` unpacks the six hourly variables of the asked years from the two tarballs into tmp_dir. `wind` compares the
 CFS daily 10 m wind with the pack's own wnd_ewd and wnd_nwd for both averaging windows, per product era, writes
 checks/wind_check.json and picks the window. `build` writes atm.npy (pack rows x pack points x CHANNELS, float32, NaN
 where not built) on that window and meta.json. `check` writes the 2010-2011 seam test and the monthly climatology.
+`pack` writes a forcing overlay for training (card emu-rea-forcing): forcing.npy with the pack's forcing channels and then
+CHANNELS, and the pack's meta.zarr with the forcing coordinates, units and train-year mean and std extended. grid.npz,
+plan.json and written.npy are copied; state.npy is not, so a training folder links it from the pack.
 
 Each hourly field is an instantaneous value (time_average_bounds 0, 0) on the product's regular Gulf grid. A day's mean
 uses the hours of that day only:
@@ -251,6 +255,38 @@ def check(pack: Path, out: Path) -> dict:
     return res
 
 
+def pack(base: Path, atm_dir: Path, out: Path) -> None:
+    import shutil
+    meta = xr.open_zarr(base / "meta.zarr", consolidated=True).load()
+    am = json.loads((atm_dir / "meta.json").read_text())
+    f0 = np.load(base / "forcing.npy", mmap_mode="r")
+    a = np.load(atm_dir / "atm.npy", mmap_mode="r")
+    if f0.shape[:2] != a.shape[:2] or am["channels"] != list(CHANNELS):
+        raise ValueError(f"pack forcing {f0.shape} and atm {a.shape} ({am['channels']}) do not line up")
+    k = f0.shape[2]
+    out.mkdir(parents=True, exist_ok=True)
+    f = np.lib.format.open_memmap(out / "forcing.npy", mode="w+", dtype=np.float32, shape=(*f0.shape[:2], k + len(CHANNELS)))
+    for i in range(0, len(f0), 64):
+        f[i:i + 64, :, :k] = f0[i:i + 64]
+        f[i:i + 64, :, k:] = a[i:i + 64]
+    f.flush()
+    names = [str(n) for n in meta.forcing_feature.values] + list(CHANNELS)
+    ext = lambda v, new: np.concatenate([meta[v].values, np.asarray(new, dtype=meta[v].dtype)])  # noqa: E731
+    units = ext("forcing_feature_units", [am["units"][c] for c in CHANNELS])
+    mean = ext("forcing_mean", [am["train_mean"][c] for c in CHANNELS])
+    std = ext("forcing_std", [am["train_std"][c] for c in CHANNELS])
+    new = meta.drop_vars(["forcing_mean", "forcing_std", "forcing_feature_units", "forcing_feature"])
+    new = new.assign_coords(forcing_feature=("forcing_feature", np.array(names)),
+                            forcing_feature_units=("forcing_feature", units))
+    new["forcing_mean"], new["forcing_std"] = ("forcing_feature", mean), ("forcing_feature", std)
+    new.attrs["forcing_overlay"] = f"{base} forcing.npy + {atm_dir}/atm.npy ({', '.join(CHANNELS)})"
+    if (out / "meta.zarr").exists():
+        shutil.rmtree(out / "meta.zarr")
+    new.to_zarr(out / "meta.zarr", consolidated=True)
+    for name in ("grid.npz", "plan.json", "written.npy"):
+        shutil.copy2(base / name, out / name)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -266,6 +302,10 @@ def main() -> None:
     c = sub.add_parser("check")
     c.add_argument("pack", type=Path)
     c.add_argument("out", type=Path)
+    o = sub.add_parser("pack")
+    o.add_argument("pack", type=Path)
+    o.add_argument("out", type=Path)
+    o.add_argument("overlay", type=Path)
     a = p.parse_args()
     if a.cmd == "extract":
         extract(a.tmp, a.years)
@@ -274,6 +314,8 @@ def main() -> None:
         print(json.dumps(wind(a.pack, a.tmp, a.out, a.years), indent=1))
     elif a.cmd == "build":
         build(a.pack, a.tmp, a.out, a.years)
+    elif a.cmd == "pack":
+        pack(a.pack, a.out, a.overlay)
     else:
         print(json.dumps(check(a.pack, a.out)["seam"], indent=1))
 
