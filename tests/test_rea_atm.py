@@ -45,3 +45,9 @@ def test_data_vars_and_paths(tmp_path):
     assert data_vars(xr.open_dataset(p)) == ["airtmp"]
     assert hourly_path(tmp_path, 2010, "Taqa").name == "cfsr_gom-sea_2010_01hr_Taqa.nc"
     assert hourly_path(tmp_path, 2011, "uv-10m").parts[-2:] == ("CFSv2_GOM", "cfsv2_gom-sec2_2011_01hr_uv-10m.nc")
+
+
+def test_years_arg_takes_lists_and_ranges():
+    from hycom_emulator.rea_atm import years_arg
+    assert years_arg("2001,2010-2012") == [2001, 2010, 2011, 2012]
+    assert years_arg("2000-2002") == [2000, 2001, 2002]

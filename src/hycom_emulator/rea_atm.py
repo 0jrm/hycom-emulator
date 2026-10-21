@@ -54,8 +54,12 @@ def hourly_path(tmp: Path, year: int, tag: str) -> Path:
 
 
 def years_arg(s: str) -> list[int]:
-    a, _, b = s.partition("-")
-    return list(range(int(a), int(b or a) + 1))
+    """'2001,2010-2012' -> [2001, 2010, 2011, 2012]."""
+    out = []
+    for part in s.split(","):
+        a, _, b = part.partition("-")
+        out += range(int(a), int(b or a) + 1)
+    return out
 
 
 def extract(tmp: Path, years: list[int]) -> None:
