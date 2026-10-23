@@ -27,6 +27,8 @@ together: in emu-b00-053-conv the unet arm's decoder output grew from ~1 to ~38 
 saturated the output MLP and froze the training loss at 1.1094.
 
 Settings: the datastore config's `conv` section, {blocks, channel_attention, stride, norm}.
+REA_ARCHS holds the reanalysis emulator's settings; `python -m hycom_emulator.convnet arch <name> <rea.yaml>` writes
+the conv section into the datastore config and prints the train_model arguments (train_rea.sh ARCH=<name>).
 Importing this module registers `conv_graph_lam` and `hycom_conv_graph_lam` (with the
 prediction-time thickness projection) with neural-lam, and everything physics registers.
 """
@@ -34,12 +36,14 @@ prediction-time thickness projection) with neural-lam, and everything physics re
 from __future__ import annotations
 
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+import yaml
 from neural_lam.models import MODELS
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 from torch import nn
@@ -50,6 +54,18 @@ from hycom_emulator.physics import ThicknessProjection
 NEW_MODULES = ("encoder.", "decoder.", "coarse_encoder.", "coarse_decoder.", "down.")
 G2M_RADIUS = 0.67  # neural-lam create_graph: grid nodes within 0.67 mesh spacings feed a mesh node
 M2G_NEIGHBOURS = 4
+
+
+# Option B on the stride-2 reanalysis grid (263x193, 0.08 deg) under the multiscale mesh (81x81, 0.26 deg spacing).
+# Conv stride 2 gives B00 option B's cells (0.16 deg, 0.6 mesh spacings: every mesh node has a grid sender within
+# G2M_RADIUS, median 4). At stride 4 the cells (0.32 deg) are coarser than the mesh: 569 of 6561 mesh nodes get no
+# sender and the median is 1.
+REA_ARCHS = {
+    "unet_norm": {"model": "conv_graph_lam", "graph": "multiscale_s2",
+                  "conv": {"blocks": 3, "channel_attention": True, "stride": 2, "norm": True}},
+    "unet_norm_s4": {"model": "conv_graph_lam", "graph": "multiscale_s4",
+                     "conv": {"blocks": 3, "channel_attention": True, "stride": 4, "norm": True}},
+}
 
 
 @dataclass(frozen=True)
@@ -219,6 +235,19 @@ def coarse_graph(graph_dir: Path, xy: np.ndarray, stride: int) -> Path:
     return out
 
 
+def apply_arch(name: str, config_path) -> list[str]:
+    """Write REA_ARCHS[name]'s conv section into the datastore config; return its train_model arguments."""
+    spec = REA_ARCHS[name]
+    cfg = yaml.safe_load(open(config_path)) | {"conv": spec["conv"]}
+    yaml.safe_dump(cfg, open(config_path, "w"), sort_keys=False)
+    return ["--model", spec["model"], "--graph", spec["graph"]]
+
+
 MODELS["conv_graph_lam"] = ConvGraphLAM
 MODELS["hycom_conv_graph_lam"] = HycomConvGraphLAM
+
+if __name__ == "__main__":
+    if sys.argv[1:2] != ["arch"] or len(sys.argv) != 4 or sys.argv[2] not in REA_ARCHS:
+        raise SystemExit(f"usage: python -m hycom_emulator.convnet arch <{'|'.join(REA_ARCHS)}> <rea.yaml>")
+    print(" ".join(apply_arch(sys.argv[2], sys.argv[3])))
 

@@ -23,11 +23,15 @@
 Each switch is off by default and changes no weights, so checkpoints load with or without them.
 
     python -m hycom_emulator.rea_train probe --config_path nlam.yaml --load <ckpt> --ar_steps_train 4 --batch_size 4 \\
-        --steps 10 [--num_workers 8] [--seed 0] [--loss rea_wmse ...] [arm flags]
+        --steps 10 [--num_workers 8] [--seed 0] [--model conv_graph_lam --graph multiscale_s2] [--precision 16-mixed] \\
+        [--loss rea_wmse ...] [arm flags]
 
 `probe` builds the model train_model would build for these flags, loads the checkpoint's weights and takes `steps`
-optimizer steps on train batches. It prints one JSON line: peak GPU memory (GiB; null on CPU), the median time per
-step and per data wait over the steps after the first, and the losses. It exits 1 on a non-finite loss.
+optimizer steps on train batches. --model and --graph replace the checkpoint's (a graph_lam checkpoint loads into
+conv_graph_lam with its conv blocks at identity); --precision 16-mixed runs as Lightning's: fp16 autocast and a gradient
+scaler. It prints one JSON line: peak GPU memory (GiB; null on CPU), the median time per step and per data wait over
+the steps after the first, the losses, and RssAnon/RssFile/RssShmem (GiB) of the probe and of each child process (the
+loader workers) after the last step. It exits 1 on a non-finite loss.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ import argparse
 import functools
 import json
 import math
+import os
 import statistics
 import sys
 import time
@@ -299,6 +304,35 @@ class ReaForecasterModule(ForecasterModule):
         self.log_dict(logs, on_step=False, on_epoch=True, sync_dist=True, batch_size=e.shape[0])
 
 
+def _rss(pid: int) -> dict:
+    """RssAnon, RssFile and RssShmem of a process in GiB, from /proc/<pid>/status (Linux)."""
+    out = {}
+    with open(f"/proc/{pid}/status") as f:
+        for line in f:
+            key, _, value = line.partition(":")
+            if key in ("RssAnon", "RssFile", "RssShmem"):
+                out[key] = round(int(value.split()[0]) / 2**20, 3)
+    return out
+
+
+def process_memory(pid: int | None = None) -> dict:
+    """{"self": rss, "children": [{"pid", "name", rss...}]} for pid (default this process) and its direct children.
+    Anonymous memory is what a process holds of its own; the pack's /dev/shm pages count as RssShmem and are shared."""
+    pid = pid or os.getpid()
+    children = []
+    for task in os.listdir(f"/proc/{pid}/task"):
+        with open(f"/proc/{pid}/task/{task}/children") as f:
+            children += [int(c) for c in f.read().split()]
+    rows = []
+    for c in sorted(set(children)):
+        try:
+            with open(f"/proc/{c}/comm") as f:
+                rows.append({"pid": c, "name": f.read().strip(), **_rss(c)})
+        except FileNotFoundError:
+            continue
+    return {"self": _rss(pid), "children": rows}
+
+
 def probe(argv: list[str]) -> int:
     import neural_lam.train_model as tm
     from neural_lam.config import load_config_and_datastore
@@ -318,6 +352,9 @@ def probe(argv: list[str]) -> int:
     p.add_argument("--num_workers", type=int, default=4)
     p.add_argument("--loss", default="wmse")
     p.add_argument("--seed", type=int, help="seed the batch order, so two probes with different loss flags see the same batches")
+    p.add_argument("--model", help="step predictor to build instead of the checkpoint's")
+    p.add_argument("--graph", help="graph to use instead of the checkpoint's")
+    p.add_argument("--precision", default="32", choices=("32", "16-mixed"))
     a = p.parse_args(rest)
     install(opts, rest)
 
@@ -326,6 +363,7 @@ def probe(argv: list[str]) -> int:
         torch.set_float32_matmul_precision("high")
     ckpt = torch.load(a.load, map_location="cpu", weights_only=False)
     args = ckpt["hyper_parameters"]["args"]
+    args.model, args.graph = a.model or args.model, a.graph or args.graph
     config, ds = load_config_and_datastore(config_path=a.config_path)
     forecaster = tm.ARForecaster(tm.build_predictor(MODELS[args.model], args, config, ds), ds)
     module = tm.ForecasterModule(forecaster=forecaster, config=config, datastore=ds, loss=a.loss, lr=args.lr)
@@ -342,6 +380,8 @@ def probe(argv: list[str]) -> int:
         if device.type == "cuda":
             torch.cuda.synchronize()
 
+    amp = a.precision == "16-mixed" and device.type == "cuda"
+    scaler = torch.amp.GradScaler(device.type, enabled=amp)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
     batches, losses, waits, steps = iter(loader), [], [], []
@@ -354,10 +394,12 @@ def probe(argv: list[str]) -> int:
         batch = module.on_after_batch_transfer([x.to(device, non_blocking=True) for x in batch], 0)
         sync()
         t1 = time.perf_counter()
-        loss = module._compute_prediction_and_loss(batch)[3].mean()
+        with torch.autocast(device.type, dtype=torch.float16, enabled=amp):
+            loss = module._compute_prediction_and_loss(batch)[3].mean()
         opt.zero_grad(set_to_none=True)
-        loss.backward()
-        opt.step()
+        scaler.scale(loss).backward()
+        scaler.step(opt)
+        scaler.update()
         sync()
         waits.append(t1 - t0)
         steps.append(time.perf_counter() - t1)
@@ -370,7 +412,7 @@ def probe(argv: list[str]) -> int:
         "ar_steps": a.ar_steps_train, "batch": a.batch_size, "loss": a.loss, "device": str(device),
         "flags": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(opts).items()},
         "peak_allocated_gib": gib(torch.cuda.max_memory_allocated), "peak_reserved_gib": gib(torch.cuda.max_memory_reserved),
-        "s_per_step": later(steps), "data_wait_s": later(waits), "losses": losses,
+        "s_per_step": later(steps), "data_wait_s": later(waits), "losses": losses, "memory_gib": process_memory(),
     }), flush=True)
     return 0 if all(map(math.isfinite, losses)) else 1
 

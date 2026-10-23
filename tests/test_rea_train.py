@@ -208,3 +208,18 @@ def test_stability_flag_needs_rea_wmse():
     assert split_args(["--loss", "rea_wmse", "--mean_penalty", "0", "--stability", "0.5"])[0].stability == 0.5
     with pytest.raises(SystemExit):
         split_args(["--stability", "0.5"])
+
+
+def test_process_memory_reads_the_probe_and_its_children():
+    import subprocess
+
+    from hycom_emulator.rea_train import process_memory
+
+    child = subprocess.Popen(["sleep", "30"])
+    try:
+        mem = process_memory()
+        assert set(mem["self"]) == {"RssAnon", "RssFile", "RssShmem"} and mem["self"]["RssAnon"] > 0
+        assert child.pid in [c["pid"] for c in mem["children"]]
+    finally:
+        child.kill()
+        child.wait()
