@@ -11,8 +11,10 @@
 # last learning rate sets that stage's starting rate by the same rule. PF_<days> is the stage's --pushforward (default 4 from 8 days on, else 0; FIRST=1 adds
 # --train_first_step), CKPT_<days>=1 its --checkpoint_steps (default from 16 days on). The test split is then scored
 # over the last stage's validation horizon with neural-lam's own per-lead metrics.
+# ARCH=<name of hycom_emulator.convnet.REA_ARCHS> trains that architecture instead of graph_lam (e.g. unet_norm: option
+# B's pre-norm U-Net level around the same mesh; a graph_lam START_CKPT loads into it with the conv blocks at identity).
 # EXCLUDE_SOURCE_CHANGES=1 drops train windows that straddle a change of reanalysis experiment.
-# Overrides: GPU, BS, HIDDEN, LAYERS, LR, WORKERS, PRECISION, STAGES, EPOCHS_/CAP_/EVAL_/PF_/CKPT_<days>, FIRST,
+# Overrides: ARCH, GPU, BS, HIDDEN, LAYERS, LR, WORKERS, PRECISION, STAGES, EPOCHS_/CAP_/EVAL_/PF_/CKPT_<days>, FIRST,
 # TRAIN, VAL, TEST (each "start end"), PY; EXTRA_ARGS (space-separated) is appended to every train_model call, e.g. a
 # model or loss of an experiment arm, --compile --nondeterministic --plateau 2 3.
 # Run detached: setsid nohup train_rea.sh <run_id> <out_dir> < /dev/null > <out_dir>/train.log 2>&1 &
@@ -30,7 +32,7 @@ export MLFLOW_TRACKING_URI=sqlite:///$OUT/mlflow.db MLFLOW_DISABLE_AGENT_HINT=1 
 MODEL=(--model graph_lam --graph multiscale --hidden_dim ${HIDDEN:-128} --processor_layers ${LAYERS:-4}
        --batch_size ${BS:-8} --precision ${PRECISION:-32} --val_interval 1
        --n_example_pred 0 --num_workers ${WORKERS:-8} --logger mlflow --runs_root "$OUT/runs")
-read -r -a EXTRA <<<"${EXTRA_ARGS:-}"; MODEL+=("${EXTRA[@]}")
+read -r -a EXTRA <<<"${EXTRA_ARGS:-}"
 
 mkdir -p "$OUT" "$SHM"
 trap 'rm -rf "$SHM"' EXIT
@@ -45,6 +47,12 @@ splits:
   test: [$TE0, $TE1]
 YAML
 printf 'datastore:\n  kind: hycom\n  config_path: rea.yaml\n' > "$OUT/nlam.yaml"
+GRAPH=multiscale
+if [ -n "${ARCH:-}" ]; then  # writes the conv section into rea.yaml; prints --model <m> --graph <g>
+  read -r -a ARCH_ARGS <<<"$($PY -m hycom_emulator.convnet arch "$ARCH" "$OUT/rea.yaml" | tail -1)"
+  MODEL+=("${ARCH_ARGS[@]}"); GRAPH=${ARCH_ARGS[3]}; echo "architecture $ARCH: ${ARCH_ARGS[*]}"
+fi
+MODEL+=("${EXTRA[@]}")
 cd "$OUT"
 last_lr() {  # the learning rate the Plateau callback logged last in stage run $1, empty if none
   $PY - "$OUT/mlflow.db" "$1" <<'PY'
@@ -59,7 +67,7 @@ epoch_of() { $PY -c "import sys, torch; print(torch.load(sys.argv[1], map_locati
 declare -A EPOCHS_DEF=([1]=30 [2]=15 [4]=10 [8]=8 [16]=6) CAP_DEF=([1]=4h [2]=3h [4]=4h [8]=6h [16]=10h)
 
 echo "== $(date -Is) graph"
-timeout 30m $PY -m hycom_emulator.nlam build_graph nlam.yaml multiscale
+timeout 30m $PY -m hycom_emulator.nlam build_graph nlam.yaml $GRAPH  # a <graph>_s<k> builds <graph> first
 next_lr() { $PY -c "import sys; lr, floor, end = map(float, sys.argv[1:]); print(min(lr, max(floor, 2 * end)))" "${LR:-1e-3}" "${LR_FLOOR:-1e-4}" "$1"; }
 PREV=${START_CKPT:-}; E=0; STAGE_LR=${LR:-1e-3}
 if [ -n "${START_RUN:-}" ]; then END_LR=$(last_lr "$START_RUN"); [ -z "$END_LR" ] || STAGE_LR=$(next_lr "$END_LR"); fi
