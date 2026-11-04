@@ -2,7 +2,7 @@
 
 Draft for discussion. Nothing here has run. The proposal is the user's: downscale the inputs with an RCAN-style convolutional encoder, run the graph network at the coarse level, upscale with an RCAN-style decoder, with channel attention, residual-in-residual groups and skip connections. This note says what the skynet RCAN project holds, why the idea fits the emulator's open failure, what to build (dimensions, parameters, loss, schedule), what it costs on 1-2 A100s with 500 GB of host RAM, and what the 1 km reanalysis on AWS would take. The implementation plan is at the end.
 
-Code facts are read from hycom-emulator `origin/main` at 7bd966a (PR 42, the stride-2 U-Net). The RCC checkout is on `main` at that commit; new code branches from it. Revision of 2026-11-04 (user): every run in this plan is one seed for now; seeds 2 and 3 follow only if the one-seed result is promising. The first build covers steps 1-7 of section 6; the 1 km line (step 8) waits for the stride-2 result and the user's AWS decision.
+Code facts are read from hycom-emulator `origin/main` at 7bd966a (PR 42, the stride-2 U-Net). The RCC checkout is on `main` at that commit; new code branches from it. Revision of 2026-11-04 (user): every run in this plan is one seed for now; seeds 2 and 3 follow only if the one-seed result is promising. The first build covers steps 1-7 of section 6; the 1 km line (step 8) waits for the stride-2 result and the user's AWS decision. Revision after the probe (user, 2026-11-04): the card trains with rollouts of at most 4 days (the 1-, 2- and 4-day stages); section 3.3 holds the measured numbers.
 
 ## 1. What the skynet RCAN project is
 
@@ -75,12 +75,12 @@ Levels are named by physical cell size, so one checkpoint loads into any pack st
 
 | Name | Pack | Levels (cell, encoder groups x blocks, decoder groups x blocks) | Conv blocks | Conv params | Total params |
 |---|---|---|---|---|---|
-| `rcan_s2` | stride 2 (0.08 deg) | 0.08: 2x3, 2x3; 0.16 (coupled): 1x3, 1x3 | 18 | about 5.6 M | about 6.5 M |
-| `rcan_s2_light` | stride 2 | 0.08: 1x3, 1x3; 0.16: 1x3, 1x3 | 12 | about 3.7 M | about 4.6 M |
-| `rcan_s1` | stride 1 (0.04 deg) | 0.04: 1x3, 1x3 (new); then `rcan_s2`'s levels | 24 | about 7.5 M | about 8.4 M |
+| `rcan_s2` | stride 2 (0.08 deg) | 0.08: 2x3, 2x3; 0.16 (coupled): 1x3, 1x3 | 18 | 7.78 M (as built) | about 8.7 M |
+| `rcan_s2_light` | stride 2 | 0.08: 1x3, 1x3; 0.16: 1x3, 1x3 | 12 | 5.69 M (as built) | about 6.6 M |
+| `rcan_s1` | stride 1 (0.04 deg) | 0.04: 1x3, 1x3 (new); then `rcan_s2`'s levels | 24 | 10.83 M (as built) | about 11.7 M |
 | `rcan_1km` | 1/100 deg | 0.01: 1x3, 1x3 (new, S2D by 4); then `rcan_s1`'s levels | 30 | about 9.4 M | about 10.3 M |
 
-One RCAB at F = 128 is 0.30 M parameters (two 3x3 convs of 128 x 129 x 9 and 128 x 128 x 9, plus the 2 K of the squeeze-excite); groups and long skips add a 3x3 conv each. `rcan_s2_light` has the U-Net's block count with RCAN's structure and is the probe size. `rcan_s2` is the card size. Processor depth is cheap (measured); 6 processor layers instead of 4 is a reasonable second arm later, not now.
+One RCAB at F = 128 is 0.30 M parameters (two 3x3 convs of 128 x 129 x 9 and 128 x 128 x 9, plus the 2 K of the squeeze-excite); groups and long skips add a 3x3 conv each. The as-built counts (head included) are higher than the first estimate, which left out the group convs, the 3x3 pixel-shuffle conv to 4F (0.59 M per level boundary), the space-to-depth 1x1 convs, the level skips and the head (0.23 M). `rcan_1km` is not in `REA_ARCHS` (the first build stops at stride 1). `rcan_s2_light` has the U-Net's block count with RCAN's structure and is the probe size. `rcan_s2` is the card size. Processor depth is cheap (measured); 6 processor layers instead of 4 is a reasonable second arm later, not now.
 
 ### 3.3 Memory and time arithmetic
 
@@ -105,7 +105,21 @@ From the unet_norm point, one grid-level RCAB costs 1.7 ms per sample-step at st
 | `rcan_s1` (per sample-step at stride 1) | 6 + 12/4 + 6/16 = 9.4 | 0.21 s per sample-step (0.16 + checkpointing) | | about 30 GB at batch 2, 60 GB at batch 4 |
 | `rcan_1km` (per sample-step) | 6 x 16 + 9.4 = 105 | 0.3-0.6 s on H100 bf16 (see section 5) | | needs block checkpointing and lazy targets (section 5) |
 
-Peaks are one step's activations times the batch plus the rollout states, since `--checkpoint_steps` keeps one step live. These are estimates; the probe in step 4 of the implementation plan replaces them.
+Peaks are one step's activations times the batch plus the rollout states, since `--checkpoint_steps` keeps one step live. These were the estimates; the probe below replaces the stride-2 rows.
+
+**Measured on skynet, 2026-11-04** (hycom-emulator feat/rcan at 12a7fec, GPUs 2 and 3, A100 80 GB, two probes at a time beside two foreign jobs on GPUs 0-1; `rea_train probe`, 50 steps, batch 8, 4 workers, 16-mixed, `--compile --nondeterministic`, rea_wmse with the stability term, from revert-fp16 with every rcan module at init; median s/step over steps 2-50; peak = torch max allocated; host = RssAnon and RssShmem of the trainer and its workers after the last step):
+
+| Configuration | 1-day s/step | x graph_lam | 1-day peak GPU | 16-day s/step (pushforward 4, `--checkpoint_steps`) | x graph_lam | 16-day peak GPU | Host, 16-day (anon + shmem) |
+|---|---|---|---|---|---|---|---|
+| graph_lam | 0.113-0.182 | 1 | 12.1 GiB | 3.05-3.13 | 1 | 22.2 GiB | 7 + 40 GB |
+| `rcan_s2_light` | 0.276-0.283 | 1.6-2.4 | 9.1-9.6 GiB | 5.37-5.69 | 1.76-1.82 | 16.3-17.4 GiB | 8 + 43 GB |
+| `rcan_s2` | 0.310-0.343 | 1.9-3.0 | 10.1-10.7 GiB | 7.26-7.76 | 2.38-2.48 | 17.4-18.8 GiB | 5 + 40 GB |
+
+Ranges are the two probe runs (before and after the pre-norm fix below; the fix adds about 5% per step). graph_lam's 1-day step varied most (0.113 then 0.182 s) with load on the shared host. Block checkpointing keeps rcan's peak below graph_lam's: the conv levels cost time, not memory. The multiscale_s2 graph on rea_s2 has a median of 4 g2m senders per mesh node and none without one (6561 mesh nodes, 12,804 coupled cells, 4 m2g edges each), as PR 42 measured.
+
+From scratch, the first build diverged at lr 1e-3: on the same batches graph_lam's 1-day loss fell from 1.5 to 0.8 while rcan_s2's jumped to 5.4 within three steps, and a one-epoch smoke reached a 4-day validation loss of 11,875. Holding the RIR long-skip convs at zero removed it. Those convs read the un-normalised residual stream, so Adam's first steps (about lr on each of 1152 taps, one sign) gave them an output that grows with the stream. The fix (12a7fec) puts a per-point LayerNorm in front of every conv that adds to the stream: the group, long-skip and level-skip convs, as the blocks already had. After it, 30 steps from scratch track graph_lam (loss 0.667 against 0.658), and the smoke of `train_rea.sh ARCH=rcan_s2` on 2021-01-01..03-01 (1-, 2- and 4-day stages, one epoch each, then emu-rea-forcing's read-out in smoke size, 4 of 4 files) ends with validation losses 2.27, 2.19 and 2.20 against graph_lam's 3.19, 2.47 and 2.33 in the same smoke. One sign to watch in the card run: the RMS of output_map's input grows under rcan (1.8 to 7.5 over 30 steps) while graph_lam's stays at 1.7.
+
+Card caps (step 5, revised by the user to a maximum training rollout of 4 days): the base arm's 1-, 2- and 4-day caps (4/3/4 h) times 3.0, the largest measured 1-day ratio, rounded up: 12/9/12 h, 33 h in all.
 
 ## 4. Loss, schedule, data
 
