@@ -13,7 +13,12 @@ puts index-space conv levels between the grid and the mesh:
     out = output_map(nodes(e0) + encoding_grid_mlp(nodes(e0)) + nodes(d0))
 
 Each enc/dec is RCAN's residual-in-residual module: groups of convnet.ResBlock (pre-norm, conv-SiLU-conv, squeeze-excite)
-with a group conv on each group's skip and a zero-initialised conv on the long skip. With head, the long-skip convs and
+with a group conv on each group's skip and a zero-initialised conv on the long skip. With `norm`, every conv whose
+output joins the residual stream reads it through a per-point LayerNorm: the group and long-skip convs and the level
+skips too, not only the blocks. Without it, the long-skip conv's first Adam steps move all 1152 taps by about lr with
+one sign, its output grows with the stream it reads, and rcan_s2 diverged from scratch at lr 1e-3 (probe 2026-11-04:
+1-day train loss 1.5 to 5.4 in three steps while graph_lam fell to 0.8; with the long-skip convs held at zero it
+tracked graph_lam). With head, the long-skip convs and
 the level skips at zero, every level starts as the identity and a GraphLAM checkpoint loads into the model as
 GraphLAM's step with the mesh reading cell means and its message written back by nearest replication. With one level
 (coupled at the grid) that is GraphLAM's step exactly. The decoders carry the mesh message, and the fine
@@ -104,6 +109,11 @@ def level_strides(levels: tuple[Level, ...], spacing: float) -> list[int]:
     return strides
 
 
+def _norm(norm: nn.LayerNorm | None, h: torch.Tensor) -> torch.Tensor:
+    """Per-point LayerNorm over channels of an image (B, F, nx, ny), or h itself."""
+    return norm(h.permute(0, 2, 3, 1)).permute(0, 3, 1, 2) if norm is not None else h
+
+
 def _pad(img: torch.Tensor, s: int) -> torch.Tensor:
     """Replicate the last rows and columns up to a multiple of s."""
     nx, ny = img.shape[-2:]
@@ -114,13 +124,14 @@ class ResidualGroup(nn.Module):
     def __init__(self, width: int, blocks: int, channel_attention: bool, norm: bool, reduction: int):
         super().__init__()
         self.blocks = nn.ModuleList(ResBlock(width, channel_attention, norm, reduction) for _ in range(blocks))
+        self.norm = nn.LayerNorm(width) if norm else None
         self.conv = nn.Conv2d(width, width, 3, padding=1)
 
     def forward(self, h, mask, checkpoint_blocks: bool = False):
         r = h
         for block in self.blocks:
             r = checkpoint(block, r, mask, use_reentrant=False) if checkpoint_blocks else block(r, mask)
-        return h + self.conv(r)
+        return h + self.conv(_norm(self.norm, r))
 
 
 class RIR(nn.Module):
@@ -130,6 +141,7 @@ class RIR(nn.Module):
     def __init__(self, width: int, groups: int, blocks: int, channel_attention: bool, norm: bool, reduction: int):
         super().__init__()
         self.groups = nn.ModuleList(ResidualGroup(width, blocks, channel_attention, norm, reduction) for _ in range(groups))
+        self.norm = nn.LayerNorm(width) if norm else None
         self.conv = nn.Conv2d(width, width, 3, padding=1)
         nn.init.zeros_(self.conv.weight)
         nn.init.zeros_(self.conv.bias)
@@ -143,7 +155,7 @@ class RIR(nn.Module):
         r = h
         for group in self.groups:
             r = group(r, mask, checkpoint_blocks)
-        return h + self.conv(r)
+        return h + self.conv(_norm(self.norm, r))
 
 
 class SpaceToDepth(nn.Module):
@@ -182,6 +194,7 @@ class RcanLevel(nn.Module):
         super().__init__()
         rir = lambda groups, blocks: RIR(width, groups, blocks, cfg.channel_attention, cfg.norm, cfg.reduction)  # noqa: E731
         self.enc, self.dec = rir(*level.enc), rir(*level.dec)
+        self.skip_norm = nn.LayerNorm(width) if cfg.norm else None
         self.skip = nn.Conv2d(width, width, 1)
         nn.init.zeros_(self.skip.weight)
         nn.init.zeros_(self.skip.bias)
@@ -269,7 +282,7 @@ class RcanGraphLAM(GraphLAM):
         for k in reversed(range(len(levels))):
             if k < len(levels) - 1:
                 d = levels[k].up(d)[..., : self.sizes[k][0], : self.sizes[k][1]]
-            d = self._rir(levels[k].dec, d + levels[k].skip(enc[k]), k)
+            d = self._rir(levels[k].dec, d + levels[k].skip(_norm(levels[k].skip_norm, enc[k])), k)
         fine = _nodes(enc[0])
         net_output = self.output_map(fine + self.encoding_grid_mlp(fine) + _nodes(d))
         if self.output_std:
