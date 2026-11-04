@@ -5,6 +5,7 @@
     python -m hycom_emulator.rollout_rea check <nlam.yaml> <ckpt> <out.json> --starts ... --horizon H --chunk C
     python -m hycom_emulator.rollout_rea figures <stats.nc> <out_dir>
     python -m hycom_emulator.rollout_rea movie <nlam.yaml> <ckpt> <out_dir> --starts 2022-01-01,2022-07-01,2023-01-01
+    python -m hycom_emulator.rollout_rea fields <nlam.yaml> <ckpt> <out.nc> --starts ... [--horizon 60] [--channels ssh]
 
 The model unrolls in chunks of --chunk days. Each chunk is one neural-lam window (WeatherDataset over the whole
 record: the config's train split is widened in memory) whose two initial states are replaced by the model's last
@@ -16,7 +17,8 @@ sample), each run for --horizon days or up to the end of the record. `run` write
 batch of starts, skips starts already in parts on a rerun, and concatenates the parts into out/stats.nc with dims
 (start, lead). STATS below is the single list of its variables. `check` measures how much chunking changes the raw
 predictions against the run-to-run noise of a repeat. `figures` plots stats.nc; `movie` reruns a few starts and
-animates model, truth and their difference for --channels (default SSH and T at 100 m).
+animates model, truth and their difference for --channels (default SSH and T at 100 m). `fields` keeps the raw
+model and truth of --channels at every lead (and the start state) for offline scores such as hycom_emulator.structure.
 """
 
 from __future__ import annotations
@@ -739,23 +741,63 @@ def movie(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, 
         plt.close(fig)
 
 
+def fields(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, chunk: int, batch: int,
+           chans: tuple[str, ...] = ("ssh",)) -> xr.Dataset:
+    """<c>_model and <c>_truth (start, lead, grid_index) and <c>_start (start, grid_index), float32, NaN past a
+    start's horizon, with lon, lat and the scoring region on grid_index; grid_index = ix * ny + iy."""
+    m = load_model(config, ckpt)
+    todo = start_set(m.times.astype("datetime64[D]"), horizon, starts)
+    cols = [m.geo.names.index(c) for c in chans]
+    H, G = max(s.horizon for s in todo), len(m.geo.region)
+    keep = {k: np.full((len(todo), H, len(chans), G), np.nan, np.float32) for k in ("model", "truth")}
+    first = np.full((len(todo), len(chans), G), np.nan, np.float32)
+    for i in range(0, len(todo), batch):
+        for lead, pos, step in unroll(m.module, m.window, m.times, todo[i:i + batch], chunk):
+            rows = [i + b for b in pos]
+            keep["model"][rows, lead - 1] = step.pred[..., cols].cpu().numpy().transpose(0, 2, 1)
+            keep["truth"][rows, lead - 1] = step.truth[..., cols].cpu().numpy().transpose(0, 2, 1)
+            if lead == 1:
+                first[rows] = step.x0[..., cols].cpu().numpy().transpose(0, 2, 1)
+        release_pack_pages(m.datastore)
+        print(f"fields: starts {i + 1}..{min(i + batch, len(todo))} of {len(todo)}", flush=True)
+    st = lambda f: m.meta.static.sel(static_feature=f).values  # noqa: E731
+    data = {}
+    for j, c in enumerate(chans):
+        data[f"{c}_model"] = (("start", "lead", "grid_index"), keep["model"][:, :, j])
+        data[f"{c}_truth"] = (("start", "lead", "grid_index"), keep["truth"][:, :, j])
+        data[f"{c}_start"] = (("start", "grid_index"), first[:, j])
+    coords = {"start": np.array([s.date for s in todo], "datetime64[ns]"), "lead": np.arange(1, H + 1),
+              "horizon": ("start", np.array([s.horizon for s in todo])), "lon": ("grid_index", st("lon")),
+              "lat": ("grid_index", st("lat")), "region": ("grid_index", m.geo.region.cpu().numpy())}
+    dlon = float(np.median(np.diff(np.unique(np.round(st("lon"), 6)))))
+    attrs = {"label": LABEL, "region_def": REGION, "checkpoint": str(ckpt), "checkpoint_md5": _md5(ckpt), "code_sha": _code_sha(),
+             "chunk": chunk, "nx": m.shape[0], "ny": m.shape[1], "dlon": dlon,
+             "created": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    ds = xr.Dataset(data, coords, attrs).sortby("start")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_netcdf(ds, out)
+    return ds
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
     dates = lambda s: s.split(",")  # noqa: E731
-    for cmd in ("run", "check", "movie"):
+    for cmd in ("run", "check", "movie", "fields"):
         q = sub.add_parser(cmd)
         q.add_argument("config", type=Path)
         q.add_argument("ckpt", type=Path)
         q.add_argument("out", type=Path)
-        q.add_argument("--starts", type=dates, required=cmd == "check",
+        q.add_argument("--starts", type=dates, required=cmd in ("check", "fields"),
                        default="2022-01-01,2022-07-01,2023-01-01".split(",") if cmd == "movie" else None)
         q.add_argument("--horizon", type=int, default=15)
         q.add_argument("--chunk", type=int, default=15)
-        if cmd == "run":
+        if cmd in ("run", "fields"):
             q.add_argument("--batch", type=int, default=8)
             q.add_argument("--stride-days", type=int, default=1, help="subsample the out-of-sample daily starts")
             q.add_argument("--limit", type=int, default=None, help="first n starts after ordering (smoke)")
+        if cmd == "fields":
+            q.add_argument("--channels", type=lambda s: tuple(s.split(",")), default=("ssh",), help="state features")
         if cmd == "movie":
             q.add_argument("--note", default="", help="first title line of every frame, e.g. which checkpoint")
             q.add_argument("--channels", type=lambda s: tuple(s.split(",")), default=("ssh", "temp_100m"),
@@ -768,6 +810,8 @@ def main() -> None:
         run(a.config, a.ckpt, a.out, a.horizon, a.chunk, a.batch, a.starts, a.stride_days, a.limit)
     elif a.cmd == "check":
         print(json.dumps(check(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk)["groups"], indent=1))
+    elif a.cmd == "fields":
+        fields(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk, a.batch, a.channels)
     elif a.cmd == "movie":
         movie(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk, a.note, a.channels)
     else:
