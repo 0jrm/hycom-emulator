@@ -2,6 +2,7 @@
 
     python -m hycom_emulator.nlam create_graph --config_path nlam.yaml --name multiscale
     python -m hycom_emulator.nlam build_graph nlam.yaml mesh3
+    python -m hycom_emulator.nlam build_graph nlam.yaml multiscale_s4 --mesh_from <other pack>/graph/multiscale
     python -m hycom_emulator.nlam train_model --config_path nlam.yaml --model graph_lam ...
     python -m hycom_emulator.nlam train_model ... --model crps_graph_lam --loss afcrps --members 2 --init_from <ckpt>
     python -m hycom_emulator.nlam train_model ... --model graph_lam --output_std --loss wcrps_gauss --init_from <ckpt>
@@ -80,14 +81,19 @@ def _exclude_source_changes() -> None:
     WeatherDataModule.setup = setup
 
 
-def build_graph(config_path: str, name: str) -> None:
+def build_graph(config_path: str, name: str, mesh_from: str | None = None) -> None:
     """Build graph/<name> next to the datastore config unless it is there. multiscale: neural-lam's
     create_graph (GraphCast-like, finest mesh 81x81, ~6x5 grid cells on 525x385). mesh3: the same layout
     from weather-model-graphs with a 125x125 finest mesh (~4x3 cells) and levels 25x25 and 5x5. wmg
     rounds each direction down to a power of the (odd) refinement factor: factor 3 gives 81x81 again,
     and asking for 3 cells (0.12 deg) gives 125x25, since rows are ~0.037 deg apart; 2.5 cells gives 125
     in both directions. <graph>_s<k>: <graph>'s mesh with grid
-    edges for k x k cells (convnet option B)."""
+    edges for k x k cells (convnet option B).
+
+    mesh_from (a graph folder, e.g. another pack's graph/multiscale): graph/<name> takes that folder's mesh and gets
+    grid edges for this datastore's grid by the same rules, instead of building a mesh on its own grid (a 1 km pack
+    would otherwise run create_graph on 3.2 M nodes; a small grid may have too few nodes for create_graph's levels).
+    With <graph>_s<k>, <graph> is built that way first."""
     from pathlib import Path
 
     from neural_lam.config import load_config_and_datastore
@@ -100,8 +106,14 @@ def build_graph(config_path: str, name: str) -> None:
     if base and stride.isdigit():
         from hycom_emulator.convnet import coarse_graph
 
-        build_graph(config_path, base)
+        build_graph(config_path, base, mesh_from)
         coarse_graph(out.with_name(base), ds.get_xy("state", stacked=False), int(stride))
+    elif mesh_from is not None:
+        from hycom_emulator.convnet import graph_on_grid
+
+        if not (Path(mesh_from) / "mesh_features.pt").is_file():
+            raise SystemExit(f"mesh_from {mesh_from}: no mesh_features.pt")
+        graph_on_grid(Path(mesh_from), ds.get_xy("state", stacked=True), out)
     elif name == "multiscale":
         from neural_lam.create_graph import cli
 
@@ -125,7 +137,14 @@ def main(argv: list[str]) -> None:
         sys.argv = ["neural_lam.create_graph", *rest]
         cli()
     elif command == "build_graph":
-        build_graph(*rest)
+        import argparse
+
+        p = argparse.ArgumentParser(prog="hycom_emulator.nlam build_graph", allow_abbrev=False)
+        p.add_argument("config_path")
+        p.add_argument("name")
+        p.add_argument("--mesh_from", help="a graph folder whose mesh to reuse (grid edges are rebuilt for this grid)")
+        a = p.parse_args(rest)
+        build_graph(a.config_path, a.name, a.mesh_from)
     elif command == "train_model":
         from neural_lam import train_model
 

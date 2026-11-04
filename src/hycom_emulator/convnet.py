@@ -219,20 +219,25 @@ def mesh_spacing(mesh_xy: np.ndarray) -> float:
     return float(steps[steps > 1e-6 * (x[-1] - x[0])].min())
 
 
-def coarse_graph(graph_dir: Path, xy: np.ndarray, stride: int) -> Path:
-    """graph_dir's mesh with grid edges for the stride x stride cells of xy (nx, ny, 2); idempotent."""
-    out = graph_dir.with_name(f"{graph_dir.name}_s{stride}")
+def graph_on_grid(mesh_dir: Path, grid_xy: np.ndarray, out: Path) -> Path:
+    """mesh_dir's mesh with g2m and m2g rebuilt for grid nodes grid_xy (N, 2) by neural-lam's rules, written to out;
+    idempotent (an existing out is kept)."""
     if (out / "m2g_features.pt").is_file():
         return out
     tmp = out.with_name(out.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
-    shutil.copytree(graph_dir, tmp)
-    mesh_xy = torch.load(graph_dir / "mesh_features.pt", weights_only=True)[0].numpy()
-    for name, (index, feats) in grid_edges(cell_centres(xy, stride).reshape(-1, 2), mesh_xy, mesh_spacing(mesh_xy)).items():
+    shutil.copytree(mesh_dir, tmp)
+    mesh_xy = torch.load(mesh_dir / "mesh_features.pt", weights_only=True)[0].numpy()
+    for name, (index, feats) in grid_edges(grid_xy, mesh_xy, mesh_spacing(mesh_xy)).items():
         torch.save(index, tmp / f"{name}_edge_index.pt")
         torch.save(feats, tmp / f"{name}_features.pt")
     tmp.rename(out)
     return out
+
+
+def coarse_graph(graph_dir: Path, xy: np.ndarray, stride: int) -> Path:
+    """graph_dir's mesh with grid edges for the stride x stride cells of xy (nx, ny, 2); idempotent."""
+    return graph_on_grid(graph_dir, cell_centres(xy, stride).reshape(-1, 2), graph_dir.with_name(f"{graph_dir.name}_s{stride}"))
 
 
 def apply_arch(name: str, config_path) -> list[str]:
