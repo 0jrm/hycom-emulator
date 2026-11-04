@@ -3,7 +3,8 @@ separations.
 
     python -m hycom_emulator.structure score <fields.nc> <out_dir> [--native]
     python -m hycom_emulator.structure truth <pack_dir> <out_dir> --from 2022-01-01 --to 2024-08-31
-    python -m hycom_emulator.structure floor <fields.nc|pack_dir> <out.json> [--n 200]
+    python -m hycom_emulator.structure floor <fields.nc> <out.json> [--n 200]
+    python -m hycom_emulator.structure report <score_dir> [--title ...]
 
 Every output carries CAVEAT: the free runs use the true future wind, sunlight and boundary band, so skill is
 optimistic, and these scores inherit that until issue-time-only forcing lands.
@@ -533,6 +534,87 @@ def truth_series(pack: Path, out: Path, t_from: str, t_to: str, floor: float = L
     return res
 
 
+MATCH_DAYS = 15  # a model separation within this many days of a truth one is the same event
+
+
+def match_events(events: list[dict]) -> list[dict]:
+    """Per start, each truth separation and the nearest model separation within MATCH_DAYS (or none)."""
+    rows = []
+    for start in sorted({e["start"] for e in events}):
+        mine = [e for e in events if e["start"] == start and e["status"] == "separation"]
+        truth, model = [e for e in mine if e["who"] == "truth"], [e for e in mine if e["who"] == "model"]
+        used = set()
+        for t in truth:
+            near = sorted((abs(m["detached_lead"] - t["detached_lead"]), i) for i, m in enumerate(model) if i not in used)
+            m = model[near[0][1]] if near and near[0][0] <= MATCH_DAYS else None
+            if m is not None:
+                used.add(near[0][1])
+            rows.append({"start": start, "truth_lead": t["detached_lead"], "model_lead": m and m["detached_lead"],
+                         "error_days": m and m["detached_lead"] - t["detached_lead"],
+                         "truth_neck0": t["neck"]["0"], "model_neck0": m and m["neck"]["0"],
+                         "truth_ring_km2": t["ring_km2"], "model_ring_km2": m and m["ring_km2"]})
+        rows += [{"start": start, "truth_lead": None, "model_lead": m["detached_lead"], "error_days": None,
+                  "truth_neck0": None, "model_neck0": m["neck"]["0"], "truth_ring_km2": None, "model_ring_km2": m["ring_km2"]}
+                 for i, m in enumerate(model) if i not in used]
+    return rows
+
+
+def report(score_dir: Path, title: str) -> str:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    res = xr.open_dataset(score_dir / "structure.nc")
+    events = json.loads((score_dir / "events.json").read_text())["events"]
+    lead = res.lead.values
+    fig, ax = plt.subplots(2, 3, figsize=(15, 8))
+    for r, k in enumerate(("max", "min")):
+        what = "maxima (anticyclones, LC)" if k == "max" else "minima (cyclones)"
+        for who, c in (("model", "C0"), ("truth", "C1")):
+            ax[r, 0].plot(lead, res[f"{k}_count_{who}"].mean("start"), c, label=who)
+            ax[r, 1].plot(lead, res[f"{k}_amp_sum_{who}"].mean("start") * 100, c, label=who)
+        ax[r, 2].plot(lead, res[f"{k}_w1_model"].mean("start") * 100, "C0", label="model vs truth")
+        ax[r, 2].plot(lead, res[f"{k}_w1_pers"].mean("start") * 100, "C2", label="persistence vs truth")
+        ax[r, 0].set(title=f"{what}: count above {res.eddy_floor_m * 100:.1f} cm", xlabel="lead (days)")
+        ax[r, 1].set(title=f"{what}: summed persistence (cm)", xlabel="lead (days)")
+        ax[r, 2].set(title=f"{what}: W1 diagram distance (cm)", xlabel="lead (days)")
+        for a in ax[r]:
+            a.legend(fontsize=8)
+    fig.suptitle(f"{title}\n{res.grid}, mean over {res.sizes['start']} starts. {CAVEAT}", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(score_dir / "structure.png", dpi=90)
+    plt.close(fig)
+    rows = match_events(events)
+    ok = [r for r in rows if r["error_days"] is not None]
+    pick = lambda leads: {l: lead.tolist().index(l) for l in leads if l in lead}  # noqa: E731
+    at = pick((1, 7, 14, 21, 30, 45, 60))
+    tab = ["| lead (d) | " + " | ".join(map(str, at)) + " |", "|---" * (len(at) + 1) + "|"]
+    for k in ("max", "min"):
+        for name, v in ((f"{k} count model / truth", res[f"{k}_count_model"].mean("start") / res[f"{k}_count_truth"].mean("start")),
+                        (f"{k} summed persistence model / truth", res[f"{k}_amp_sum_model"].mean("start") / res[f"{k}_amp_sum_truth"].mean("start")),
+                        (f"{k} W1 model / persistence", res[f"{k}_w1_model"].mean("start") / res[f"{k}_w1_pers"].mean("start"))):
+            tab.append(f"| {name} | " + " | ".join(f"{float(v[i]):.2f}" for i in at.values()) + " |")
+    ev = ["| start | truth sep. lead | model sep. lead | error (d) | neck at detachment truth / model (cm) | ring area truth / model (1000 km2) |",
+          "|---|---|---|---|---|---|"]
+    f = lambda x, s=1: "-" if x is None else f"{x * s:.0f}"  # noqa: E731
+    for r in rows:
+        ev.append(f"| {r['start']} | {f(r['truth_lead'])} | {f(r['model_lead'])} | {f(r['error_days'])} | "
+                  f"{f(r['truth_neck0'], 100)} / {f(r['model_neck0'], 100)} | {f(r['truth_ring_km2'], 1e-3)} / {f(r['model_ring_km2'], 1e-3)} |")
+    n_t = sum(r["truth_lead"] is not None for r in rows)
+    n_m = sum(r["model_lead"] is not None for r in rows)
+    err = np.array([r["error_days"] for r in ok], float)
+    md = "\n".join([f"# {title}", "", f"**Caveat.** {CAVEAT}.", "", f"**Pending.** {PENDING}.", "",
+                     f"Grid: {res.grid} ({res.cells} cells); eddy floor {res.eddy_floor_m * 100:.1f} cm, LC floor {res.lc_floor_m * 100:.1f} cm; "
+                     f"{res.sizes['start']} starts, leads 1-{lead[-1]}. Ratios are of means over starts.", "", *tab, "",
+                     f"Separations inside the free runs (confirmed: no counted rejoin within {SEPARATION_DAYS} days, so only "
+                     f"detachments by lead {lead[-1] - SEPARATION_DAYS - REJOIN_DAYS - 1} are always decidable): truth {n_t}, model {n_m}, "
+                     f"matched within {MATCH_DAYS} days {len(ok)}" + (f", median |error| {np.median(np.abs(err)):.0f} d, mean error {err.mean():+.1f} d." if len(ok) else "."),
+                     "", *ev, "", "![structure](structure.png)", ""])
+    (score_dir / "report.md").write_text(md)
+    return md
+
+
 def main() -> None:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -545,6 +627,9 @@ def main() -> None:
     q.add_argument("out", type=Path)
     q.add_argument("--from", dest="t_from", required=True)
     q.add_argument("--to", dest="t_to", required=True)
+    q = sub.add_parser("report")
+    q.add_argument("score_dir", type=Path)
+    q.add_argument("--title", default="SSH structure score")
     q = sub.add_parser("floor")
     q.add_argument("fields", type=Path)
     q.add_argument("out", type=Path)
@@ -552,6 +637,8 @@ def main() -> None:
     a = p.parse_args()
     if a.cmd == "score":
         score(a.fields, a.out, a.native)
+    elif a.cmd == "report":
+        print(report(a.score_dir, a.title))
     elif a.cmd == "truth":
         print(json.dumps(truth_series(a.pack, a.out, a.t_from, a.t_to), indent=1))
     else:

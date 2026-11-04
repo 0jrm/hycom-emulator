@@ -208,6 +208,16 @@ def test_score_end_to_end_sees_damped_eddies(tmp_path):
     assert (res.min_amp_sum_model.isel(lead=-1) < res.min_amp_sum_truth.isel(lead=-1)).all()
     ev = json.loads((tmp_path / "out" / "events.json").read_text())
     assert ev["caveat"] == st.CAVEAT and isinstance(ev["events"], list)
+    md = st.report(tmp_path / "out", "synthetic")
+    assert st.CAVEAT in md and (tmp_path / "out" / "structure.png").exists()
+
+
+def test_match_events_pairs_nearest_and_lists_extras():
+    def e(who, lead, start="2024-01-01", status="separation"):
+        return {"start": start, "who": who, "detached_lead": lead, "status": status, "neck": {"0": 0.3}, "ring_km2": 2e4}
+    rows = st.match_events([e("truth", 20), e("model", 26), e("model", 50), e("truth", 40, status="rejoined"), e("truth", 5, "2024-02-01")])
+    assert [(r["start"], r["truth_lead"], r["model_lead"], r["error_days"]) for r in rows] == [
+        ("2024-01-01", 20, 26, 6), ("2024-01-01", None, 50, None), ("2024-02-01", 5, None, None)]
 
 
 def test_native_grid_matches_image_order(tmp_path):
