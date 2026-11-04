@@ -2,68 +2,68 @@
 
 > **Caveat (every number below).** The free runs use the true future wind, sunlight and boundary band. Their skill is optimistic, and these structure scores inherit that until issue-time-only forcing lands.
 
-`hycom_emulator.structure` asks whether a free run keeps the eddies and the Loop Current (LC) behaviour of the reanalysis. Pointwise RMSE does not answer this. It is evaluation only and adds no loss term. It ports the method of the persistence-ocean project, where closed-contour eddy detection on SSH is 0-dimensional persistent homology.
+`hycom_emulator.structure` asks whether a free run keeps the eddies and the Loop Current (LC) behaviour of the reanalysis. Pointwise RMSE does not answer this. It is evaluation only and adds no loss term.
+
+## Engine: vendored from persistence-ocean
+
+`hycom_emulator.topology` is a minimal port of persistence-ocean (branch `feat/write-up-assets`, commit 205e3c3). It takes `cubical_h0`, `merge_tree`, `boundary`, `null_model` and `loop_current`, and leaves their logic unchanged; numba is optional. The reference repository came over as a git bundle with Jose's approval. It is used read-only outside this repository, and none of its history is pushed.
+
+The port is checked against the reference on the reference's own data. `scripts/structure_duacs_check.py` runs the ported LC17 rules on DUACS ADT 2017-2021 (skynet `/unity/g2/jmiranda/persistence-ocean/duacs_subset`) at the reference setting. It reproduces all seven final separations of `lc_events_summary_L50_snp_central.csv`: the same dates, piece positions and pixel counts, with 10 seed cells and 21 detachments. The skynet files differ in bytes from the reference run's (they are a separate download); the events match all the same. The reference's merge-tree, connection-level and LC17 tests are ported into `tests/test_structure.py`.
 
 ## What it computes
 
 The inputs are SSH of model and truth at every lead, from `rollout_rea fields`. Existing rollouts keep only per-lead statistics, so the fields must be written once.
 
-1. **Eddy census.** It computes the superlevel persistence (maxima: anticyclones and the LC) and sublevel persistence (minima: cyclones) of SSH. A feature counts when its persistence is at least the floor. For model and truth, at each lead, it reports the count, the median and p90 persistence, and the summed persistence.
-2. **Diagram distance.** It computes W1 and bottleneck distances (L-infinity ground metric) between the diagrams of model and truth, over pairs above the floor only. It computes the same distance from the start state to the truth (persistence) as the baseline.
-3. **Loop Current.** It demeans SSH over the Gulf. The seed is the highest region cell in the Yucatan box (W -86.6, E -85.2, S 21.5, N 22.0). On the 0.25° grid there are 10 such cells; a test checks this.
-   - The same Kruskal pass gives each cell's neck saddle (the level at which it joins the seed) and its neck depth, min(h, seed-side peak) - saddle.
-   - Detachments come from the 17 cm contour. A rejoin counts when saddle - 17 cm stays at or above the LC floor for more than 8 days in a row. A detachment is a separation when no counted rejoin follows within 30 days.
-   - Every event records the neck depth from 20 days before detachment to the end of tracking (`events.json`).
-4. **Noise floor** (`structure floor`). It runs a correlated-noise null: Gaussian noise of 3.5 cm with a Gaussian covariance of 50 km. The floor is the 95th percentile of the persistence of the noise's features.
+1. **Eddy census.** H0 persistence with 8-connectivity and an open boundary: a component dies when it reaches land or the grid edge. This is the setting of the reference's atlas audit and of its signal-plus-noise floor. Maxima are anticyclones (and the LC); minima are cyclones. A feature counts when its persistence is at least 5.5 cm, the reference's signal-plus-noise floor per eddy in the open Gulf. Per lead it reports the count, the median and p90 persistence, and the summed persistence.
+2. **Diagram distance.** W1 and bottleneck distances (L-infinity ground metric) between the model and truth diagrams, over pairs above the floor only. The same distance from the start state (persistence) to the truth is the baseline.
+3. **Loop Current.** The reference rules on the 0.25° Gulf:
+   - SSH minus its plain Gulf mean.
+   - The seed is the highest of the 10 Gulf cells in the Yucatan box.
+   - Detachments come from the 17 cm contour. Each piece is followed to its fate.
+   - A rejoin counts when its touch depth (connection level to the seed minus 17 cm) is at least 4.324 cm on more than 8 days in a row.
+   - A final separation is a piece north of 24 N or west of 87 W that stays off the 17 cm LC for more than 30 days without a counted rejoin.
+   - Each event's neck depth, min(h_max, seed-side peak) - h_saddle, is tracked from the separation back to the run's start (at most 180 days) and 30 days forward.
 
-Scored water is the fields' region (Gulf, ocean, outside the boundary band) deeper than 500 m. On the shelf, wind set-up and set-down make SSH extrema that are not eddies. On 2022-09-28 (Ian), the shelf added up to ten minima above the floor to one day of truth.
+The census leaves out water shallower than 500 m. In daily-mean HYCOM SSH, storm set-up and set-down on the shelf make extrema that mapped DUACS does not show: on 2022-09-28 (Ian), up to ten minima above the floor in one day of truth. The LC keeps the shelf, as the reference does.
 
 ## Grid and floor: regrid to 0.25°
 
-Scores are computed on the DUACS 0.25° cells (centres at k/4 + 1/8). Each cell is the mean of the emulator cells it holds. A cell is kept when at least half of its emulator cells are scored water. The floors are the calibrated persistence-ocean values: 5.5 cm per eddy and 4.3 cm per LC feature. The reasons:
+Scores are computed on the DUACS 0.25° cells (centres at k/4 + 1/8). Each cell is the mean of the emulator cells it holds. A cell is kept when at least half of its emulator cells are scored water. This is the grid on which every floor and LC rule was set. The calibrated floor is the signal-plus-noise floor, and it exists only on that grid; recalibrating it natively would mean rerunning the reference's signal-plus-noise experiments on the HYCOM grid.
 
-- The floor was calibrated on 0.25° DUACS. On another grid the same null gives a different number. Our null gives 7.9 cm at 0.25° and 6.4 cm on the 0.08° emulator grid (`floor.json`), so a floor moved between grids without recalibration would be wrong by about 20%.
-- Our null does not reproduce the reference's 5-6 cm (it gives 7.9 cm). The covariance shape, the quantile or what is pooled must differ from `null_model.py`. Until that code is in hand, a native-grid recalibration would rest on an unchecked null. The 0.25° route needs no null at all.
-- The 0.25° grid is also where the LC rules (the ten Yucatan cells, 17 cm) were defined.
+The pure-noise null (the reference's experiment 02, run at a constant 3.5 cm and L = 50 km) does barely depend on resolution: 5.9 cm at 0.25° and 5.8 cm at 0.08° (`floor.json`). So `--native` is a usable sensitivity check, scored with the 5.8 cm pure-noise floor. The 0.25° score stays the primary one.
 
-`--native` scores on the 0.08° grid with the floor from our null. That is a sensitivity check, not the score.
+## Result: revert-fp16, 13 free runs of 60 days
 
-## First result: revert-fp16, 13 free runs of 60 days
-
-The checkpoint is revert-fp16 (card emu-rea-revert, md5 6192b343). Each of the 13 starts is 20 days before a 2022-2024 truth separation, and 2024-07-01 is added. The run was inference only, on skynet GPU 3, and took 35 s. The fields reproduce the existing `rollout-h15/stats.nc` SSH RMSE at the same starts to a relative 2.4e-7. Outputs are in `skynet:/scratch/jmiranda/hycom-emulator-runs/structure-score/` (`revert-fp16/score-quarter/report.md`, `score-native/`, `truth-2022-2024/`, `floor.json`). The code is 642b903.
+The checkpoint is revert-fp16 (card emu-rea-revert, md5 6192b343). The 13 starts were picked 20 days before detachments found by the first, superseded version of this module, plus 2024-07-01. The run was inference only, on skynet GPU 3, and took 35 s. The fields reproduce the existing `rollout-h15/stats.nc` SSH RMSE at the same starts to a relative 2.4e-7. Outputs are in `skynet:/scratch/jmiranda/hycom-emulator-runs/structure-score/` (`revert-fp16/score-quarter/`, `score-native/`, `truth-2022-2024/`, `floor.json`, `duacs_check.log`).
 
 Model/truth ratios of means over starts, on the 0.25° grid:
 
 | lead (d) | 1 | 7 | 14 | 21 | 30 | 45 | 60 |
 |---|---|---|---|---|---|---|---|
-| maxima count | 1.00 | 0.86 | 0.97 | 0.89 | 0.88 | 0.74 | 0.60 |
-| maxima summed persistence | 0.99 | 0.94 | 0.94 | 0.88 | 0.84 | 0.79 | 0.73 |
-| maxima W1, model / persistence | 0.86 | 0.93 | 0.91 | 0.84 | 0.83 | 0.90 | 0.91 |
-| minima count | 1.02 | 0.88 | 0.82 | 0.80 | 0.80 | 0.70 | 0.75 |
-| minima summed persistence | 1.00 | 0.86 | 0.78 | 0.75 | 0.75 | 0.70 | 0.71 |
-| minima W1, model / persistence | 0.82 | 0.99 | 0.97 | 0.90 | 0.85 | 0.95 | 0.96 |
+| anticyclone count | 0.96 | 1.02 | 0.95 | 0.87 | 0.83 | 0.82 | 0.75 |
+| anticyclone summed persistence | 0.97 | 0.97 | 0.98 | 0.91 | 0.90 | 0.81 | 0.79 |
+| anticyclone W1, model / persistence | 0.79 | 0.96 | 0.84 | 0.76 | 0.78 | 0.85 | 0.81 |
+| cyclone count | 1.04 | 0.76 | 0.64 | 0.66 | 0.61 | 0.36 | 0.38 |
+| cyclone summed persistence | 0.99 | 0.71 | 0.55 | 0.53 | 0.47 | 0.27 | 0.28 |
+| cyclone W1, model / persistence | 1.14 | 1.29 | 1.28 | 1.07 | 0.93 | 0.87 | 0.97 |
 
-- **Variance collapse shows as eddies fading below the floor, cyclones first.** The truth holds 12.5-13.5 cyclones above 5.5 cm. The model falls from 12.6 to about 9.5 by day 21 and stays there; summed cyclone persistence is 0.75 of truth at day 21. Anticyclones hold to about day 30 (0.88), then fall to 0.60 of truth by day 60.
-- **Diagram distance** beats persistence only modestly: 0.83-0.93 for maxima and 0.85-0.99 for minima after day 7.
-- **Separations inside the runs.** Truth has 15 separations and the model has 10. Nine are matched within 15 days, with median |date error| 4 d and mean -1.6 d. Neck depth at detachment agrees when matched (truth/model, cm: 27/25, 34/33, 26/23, 30/33, 24/16).
-  - Of the 8 large truth rings (≥ 40,000 km²), the model reproduces 5 (errors +7, -12, 0, -4, +1 d) and misses 3 (starts 2022-06-15, 2023-09-09, 2024-02-08).
-  - The model adds one early separation the truth does not have (start 2023-03-14, lead 2, 31,000 km²).
-- **The native grid reads differently for anticyclones.** At 0.08° with the 6.4 cm floor, the model has 1.14-1.19 times the truth's maxima at days 7-21, and its W1 is above persistence (1.08-1.23). Small model maxima exist at grid scale and the 0.25° mean removes them. Cyclones fade the same way on both grids (0.68 of truth at day 21).
+- **Variance collapse is a cyclone deficit.** Truth keeps about 3.6 cyclones above 5.5 cm. The model falls from 3.7 to 2.5 within a week, to 1.8 by day 30 and to 1.2 by day 60. Summed cyclone persistence is 0.55 of truth at day 14 and 0.27 at day 45.
+- **Anticyclones hold for two weeks**, then fade slowly: 0.87 of truth's count at day 21 and 0.75 at day 60.
+- **Diagram distance.** For anticyclones the model is closer to truth than persistence at every lead (0.76-0.96). For cyclones it is further than persistence through day 21 (1.07-1.29): keeping the start state's cyclones beats the model's faded ones.
+- **The native grid agrees on cyclones** (0.68 of truth at day 14, 0.47 at day 45). At native resolution the model has 1.18 times truth's anticyclones at day 7, small grid-scale maxima that the 0.25° mean removes.
+- **LC separations inside the runs.** Truth and model are judged on the same 61-day windows. Truth has 9 final separations and the model 7; 4 match within 15 days, with errors +9, -8, +3 and -3 d. Neck depth at separation agrees when they match (truth/model, cm: 29/30, 42/38, 31/26, 34/39).
+  - The model misses 5 truth separations (starts 2022-06-15, 2023-03-14, 2023-09-09, 2024-02-08, 2024-03-19).
+  - It adds 3: two at lead 2-3 that truth makes at lead 20 (an early break-off), and one at lead 28 in the 2024-07-01 run.
+  - A 61-day window decides "final" more often than the full record does: a piece that reattaches after the window looks final. Truth inside the windows therefore has more separations than the long series.
 
 ## Truth alone, 2022-01 to 2024-08
 
-The 17 cm rule as briefed confirms 14 separations in 32 months (`truth_events.json`). The persistence-ocean work found seven in five years of DUACS. Ring areas at detachment split into two groups. One group is 47,000-100,000 km², with 8 events (2022-01-30, 06-14, 09-07, 12-14, 2023-07-04, 09-28, 2024-02-27, 07-25). The other is 2,000-19,000 km², which are shed fragments. A ring-area threshold between the groups would match the known LC ring rate better. It is not applied here because the reference rule has no such threshold that we know of.
+With the reference rule there are 4 final separations: 2022-09-10, 2023-04-03, 2023-09-29 and 2024-02-28. One more, on 2024-08-15, is censored by the record's end. That is about 1.5 a year, in line with the reference's 7 in five years of DUACS. The first, superseded version of this module found 14, because it counted every detachment that decayed and had no LCE-region filter.
 
 ## Unverified
 
-- The engine was written from the brief. It is not yet checked against persistence-ocean's `cubical_h0.py`, `merge_tree.py`, `loop_current.py` and `null_model.py`. Four readings are ours:
-  - 4-connectivity.
-  - The essential pair dies at its mask piece's minimum.
-  - The rejoin margin is saddle - 17 cm, measured at the highest LC cell in the ring's footprint.
-  - The null's covariance and quantile.
-
-  The reference repo is on the laptop only. A git bundle (`git -C ~/work/persistence-ocean-lc bundle create /tmp/po.bundle feat/write-up-assets`, then `scp` to RCC) would settle all four.
-- Separation dates for model runs come from 60-day runs. Only detachments by lead 21 are always decidable, and the matching window (15 days) is our choice.
-- The result comes from one checkpoint, one seed and 13 starts. It is a demonstration of the score, not a verdict on revert-fp16.
-- This GPU inference ran without a question card. It was an evaluation of an existing checkpoint at the user's request, and it trained nothing.
+- The census floor (5.5 cm) and the touch floor (4.324 cm) are DUACS calibrations. They mark what altimetry could resolve, not an error of the reanalysis truth.
+- The run starts were chosen from the superseded event list, so they are not centred on the 4 real truth separations. A rerun from 20 days before each of those 4 (and from the 2017-2021 events on in-sample starts) would test separation timing directly.
+- This is one checkpoint, one seed and 13 starts: a demonstration of the score, not a verdict on revert-fp16.
+- This GPU inference ran without a question card. It evaluated an existing checkpoint and trained nothing.
 - The optional temperature front score is not built.
