@@ -18,6 +18,7 @@ import sys
 
 import hycom_emulator.datastore  # noqa: F401  registers DATASTORES["hycom"]
 import hycom_emulator.convnet  # noqa: F401  registers the conv models and, via physics, hycom_graph_lam and hycom_wmse
+import hycom_emulator.rcan  # noqa: F401  registers rcan_graph_lam
 import hycom_emulator.rea_loss  # noqa: F401  registers rea_wmse
 from hycom_emulator import ensemble  # registers crps_graph_lam, afcrps and fcrps
 from hycom_emulator import gauss  # registers wcrps_gauss and std_feedback_graph_lam
@@ -88,7 +89,7 @@ def build_graph(config_path: str, name: str, mesh_from: str | None = None) -> No
     rounds each direction down to a power of the (odd) refinement factor: factor 3 gives 81x81 again,
     and asking for 3 cells (0.12 deg) gives 125x25, since rows are ~0.037 deg apart; 2.5 cells gives 125
     in both directions. <graph>_s<k>: <graph>'s mesh with grid
-    edges for k x k cells (convnet option B).
+    edges for k x k cells (convnet option B, the rcan coupled level).
 
     mesh_from (a graph folder, e.g. another pack's graph/multiscale): graph/<name> takes that folder's mesh and gets
     grid edges for this datastore's grid by the same rules, instead of building a mesh on its own grid (a 1 km pack

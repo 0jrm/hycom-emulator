@@ -340,6 +340,7 @@ def probe(argv: list[str]) -> int:
     from neural_lam.weather_dataset import WeatherDataset
 
     import hycom_emulator.convnet  # noqa: F401  registers our models
+    import hycom_emulator.rcan  # noqa: F401  registers rcan_graph_lam
     import hycom_emulator.datastore  # noqa: F401  registers the hycom kind
 
     opts, rest = split_args(argv)
