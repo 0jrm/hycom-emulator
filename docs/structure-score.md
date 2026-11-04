@@ -56,6 +56,22 @@ Model/truth ratios of means over starts, on the 0.25° grid:
   - It adds 3: two at lead 2-3 that truth makes at lead 20 (an early break-off), and one at lead 28 in the 2024-07-01 run.
   - A 61-day window decides "final" more often than the full record does: a piece that reattaches after the window looks final. Truth inside the windows therefore has more separations than the long series.
 
+## Separation timing: 16 runs around the 4 truth separations
+
+These are 60-day revert-fp16 free runs started 10, 20, 30 and 40 days before each 2022–2024 final separation (inference only, GPU 3; `revert-fp16-events/`). The truth row below is the long-series event. Inside a 60-day window, truth can only confirm a separation by lead 29, so the 30- and 40-day runs leave truth censored but still date the model's break-off. Errors are the model's final separation minus the truth date; "none" means no model separation in the window.
+
+| truth separation (ring area) | start 10 d before | 20 d | 30 d | 40 d |
+|---|---|---|---|---|
+| 2022-09-10 (76,000 km²) | −2 d | −8 d | −28 d | −30 d |
+| 2023-04-03 (15,000 km²) | 0 d | −17 d | −18 d | −23 d |
+| 2023-09-29 (84,000 km²) | 0 d | +26 d (censored) | −23 d (12,000 km² piece) | none |
+| 2024-02-28 (57,000 km²) | none | none | none | −13 d |
+
+- **From 10 days out the model dates 3 of 4 separations within 2 days.** Its ring areas (67,000-75,000 km²) and neck depths at separation (34-46 cm) match truth's.
+- **From 20-40 days out the timing is lost.** Seven of the 12 runs separate a ring 8-30 days early, usually within the run's first 2-17 days. One is 26 days late, and three make no separation at all. For 2022-09-10 the error tracks the start offset: the model sheds the ring a fixed few days into the run, not at the event.
+- The early rings are of realistic size and neck depth (28-38 cm), so the model makes plausible rings at the wrong time. This points to the Loop Current neck pinching off too soon in free runs. That would fit the cyclone deficit above, since cyclones flanking the neck help set when a ring separates; this link is a hypothesis, not tested.
+- The census ratios over these 16 runs repeat the 13-run result: cyclone count 0.60 of truth at day 21 and 0.30 at day 45; anticyclones 0.89 to day 45.
+
 ## Truth alone, 2022-01 to 2024-08
 
 With the reference rule there are 4 final separations: 2022-09-10, 2023-04-03, 2023-09-29 and 2024-02-28. One more, on 2024-08-15, is censored by the record's end. That is about 1.5 a year, in line with the reference's 7 in five years of DUACS. The first, superseded version of this module found 14, because it counted every detachment that decayed and had no LCE-region filter.
@@ -63,7 +79,7 @@ With the reference rule there are 4 final separations: 2022-09-10, 2023-04-03, 2
 ## Unverified
 
 - The census floor (5.5 cm) and the touch floor (4.324 cm) are DUACS calibrations. They mark what altimetry could resolve, not an error of the reanalysis truth.
-- The run starts were chosen from the superseded event list, so they are not centred on the 4 real truth separations. A rerun from 20 days before each of those 4 (and from the 2017-2021 events on in-sample starts) would test separation timing directly.
+- The 13-run starts came from the superseded event list. Four of them happen to fall 20 days before the real truth separations, and the 16-run set above is centred on all four. Only 4 out-of-sample events exist, so the timing result is 16 runs on 4 events. In-sample events (2001–2021 reanalysis) would add events but test a model that saw them in training.
 - This is one checkpoint, one seed and 13 starts: a demonstration of the score, not a verdict on revert-fp16.
 - This GPU inference ran without a question card. It evaluated an existing checkpoint and trained nothing.
 - The optional temperature front score is not built.
