@@ -13,6 +13,7 @@ Importing this module registers the datastore kind `hycom` with neural-lam.
 Training reads a pack_b00 folder staged in /dev/shm: state and forcing are memory-mapped .npy,
 so the DataLoader workers (forked, see nlam.py) share one copy of the pages and nothing is
 decoded per sample. A zarr opens lazily (no dask, so forking stays safe); fine for tests and scoring.
+An int16 rea_pack (--dtype int16) is converted back to float32 per indexed block, in the worker that reads it.
 A stack_b00 folder has a leading ensemble_member axis: neural-lam then draws each sample from one
 member, so every member is a separate run over the same dates.
 
@@ -31,6 +32,8 @@ import numpy as np
 import xarray as xr
 import yaml
 from neural_lam.datastore import DATASTORES
+from xarray.backends import BackendArray
+from xarray.core import indexing
 from neural_lam.datastore.base import BaseRegularGridDatastore, CartesianGridShape
 
 CATEGORIES = ("state", "forcing", "static")
@@ -146,11 +149,37 @@ def _open(path: Path) -> xr.Dataset:
     if not (path / "meta.zarr").is_dir():
         return xr.open_zarr(path, consolidated=True, chunks=None)  # lazy without dask: safe to fork
     ds = xr.open_zarr(path / "meta.zarr", consolidated=True, chunks=None).load()
+    scale = ds.attrs.get("int16_scale")
     for name in PACKED:
         arr = np.load(path / f"{name}.npy", mmap_mode="r")
         dims = ("time", "grid_index", f"{name}_feature")
-        ds[name] = (("ensemble_member", *dims) if arr.ndim == 4 else dims, arr)
+        dims = ("ensemble_member", *dims) if arr.ndim == 4 else dims
+        if arr.dtype == np.int16:
+            if scale is None:
+                raise ValueError(f"{path}/{name}.npy is int16 but meta.zarr has no int16_scale (an unfinished conversion?)")
+            arr = indexing.LazilyIndexedArray(_FixedPoint(arr, ds[f"{name}_mean"].values, ds[f"{name}_std"].values, scale))
+        ds[name] = xr.Variable(dims, arr)
     return ds
+
+
+class _FixedPoint(BackendArray):
+    """An int16 standardised pack array read as float32: each indexed block is converted when read (in the loader
+    worker), so the memory map stays int16 and so does the shared memory behind it."""
+
+    def __init__(self, q: np.ndarray, mean: np.ndarray, std: np.ndarray, scale: float):
+        self.q, self.shape, self.dtype = q, q.shape, np.dtype(np.float32)
+        self.mean, self.step = mean.astype(np.float32), (std / scale).astype(np.float32)
+
+    def __getitem__(self, key):
+        return indexing.explicit_indexing_adapter(key, self.shape, indexing.IndexingSupport.BASIC, self._read)
+
+    def _read(self, key):
+        return np.asarray(self.q[key], np.float32) * self.step[self._feature(key)] + self.mean[self._feature(key)]
+
+    def _feature(self, key):
+        """The feature axis is last: the part of key that indexes it, kept as an axis."""
+        k = key[-1] if isinstance(key, tuple) and len(key) == self.q.ndim else slice(None)
+        return slice(k, k + 1) if isinstance(k, (int, np.integer)) else k
 
 
 PACKED = ("state", "forcing")
