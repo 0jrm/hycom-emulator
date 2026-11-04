@@ -321,7 +321,8 @@ def test_fields_keep_raw_model_truth_and_start_per_lead(record, tmp_path, monkey
     module, window, times, state = record
     geo, *_ = _geo(np.random.default_rng(1))
     lon, lat = np.linspace(-90, -85, G), np.linspace(22, 26, G)
-    static = xr.DataArray(np.stack([lon, lat], 1), dims=("grid_index", "static_feature"), coords={"static_feature": ["lon", "lat"]})
+    static = xr.DataArray(np.stack([lon, lat, np.full(G, 1000.0)], 1), dims=("grid_index", "static_feature"),
+                          coords={"static_feature": ["lon", "lat", "depth"]})
     model = rr.Model(module, window, times, geo, xr.Dataset({"static": static}), (5, 4), None)
     monkeypatch.setattr(rr, "load_model", lambda c, k: model)
     monkeypatch.setattr(rr, "release_pack_pages", lambda d: None)

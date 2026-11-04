@@ -17,6 +17,10 @@ dies at the lowest value of its piece, so every pair is finite and both fields o
 have the same number of them. Persistence = birth - death; a feature counts when its persistence is at least the
 floor.
 
+Region. The fields' scoring region (Gulf, ocean, outside the boundary band) deeper than MIN_DEPTH_M, as
+rollout_rea's Loop Current and isotach.gulf_region use: on the shelf, wind set-up and set-down (2022-09-28, Ian)
+add tens of SSH extrema above the floor in a day.
+
 Grid. Scores are computed on the 0.25 deg DUACS grid (cell centres at k/4 + 1/8): the mean of the emulator cells
 whose centres fall in each cell, a cell kept when at least half of its emulator cells are in the region. This is the
 grid the floor was calibrated on (persistence-ocean, DUACS 2017-2021), so the floor transfers without a new null
@@ -58,6 +62,7 @@ EDDY_FLOOR_M = 0.055  # per eddy, open Gulf, 0.25 deg DUACS (persistence-ocean; 
 LC_FLOOR_M = 0.043  # per feature in the Loop Current windows, 0.25 deg DUACS (persistence-ocean)
 NOISE_M, NOISE_KM = 0.035, 50.0  # DUACS mapping error against SWOT KaRIn (3.3-3.8 cm, 50 km, 8 days)
 LC_LEVEL_M = 0.17
+MIN_DEPTH_M = 500.0  # scored water: storm set-up and set-down on the shelf make SSH extrema that are not eddies
 LCE_MIN_KM2 = 1000.0  # rollout_rea.LCE_MIN_KM2
 YUCATAN_BOX = {"lon": (-86.6, -85.2), "lat": (21.5, 22.0)}
 REJOIN_DAYS = 8  # a rejoin counts when its margin holds for more than this many days in a row
@@ -454,7 +459,8 @@ def open_fields(path: Path) -> xr.Dataset:
 
 def scoring_grid(ds: xr.Dataset, use_native: bool) -> tuple[Grid, callable]:
     """The Grid and a map from flat fine fields (..., grid_index) to its cells."""
-    lon, lat, region = ds.lon.values, ds.lat.values, ds.region.values.astype(bool)
+    lon, lat = ds.lon.values, ds.lat.values
+    region = ds.region.values.astype(bool) & (np.nan_to_num(ds.depth.values) > MIN_DEPTH_M)
     if not use_native:
         r = quarter(lon, lat, region)
         return r.grid, r
@@ -507,7 +513,8 @@ def truth_series(pack: Path, out: Path, t_from: str, t_to: str, floor: float = L
     meta = xr.open_zarr(pack / "meta.zarr", consolidated=True)
     names = [str(n) for n in meta.state_feature.values]
     st = lambda f: meta.static.sel(static_feature=f).values  # noqa: E731
-    region = st("gulf").astype(bool) & st("ocean").astype(bool) & ~meta.boundary_mask.values.astype(bool)
+    region = (st("gulf").astype(bool) & st("ocean").astype(bool) & ~meta.boundary_mask.values.astype(bool)
+              & (np.nan_to_num(st("depth")) > MIN_DEPTH_M))
     r = quarter(st("lon"), st("lat"), region)
     times = meta.time.values.astype("datetime64[D]")
     rows = np.flatnonzero((times >= np.datetime64(t_from)) & (times <= np.datetime64(t_to)))

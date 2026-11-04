@@ -193,7 +193,8 @@ def fields_file(tmp_path, n_start=2, horizon=6, damp=0.5):
                      "ssh_start": (("start", "grid_index"), np.stack([ssh(s, 1.0) for s in range(n_start)]).astype(np.float32))},
                     {"start": np.datetime64("2024-01-01", "ns") + np.arange(n_start) * np.timedelta64(1, "D"),
                      "lead": lead, "horizon": ("start", np.full(n_start, horizon)), "lon": ("grid_index", lon),
-                     "lat": ("grid_index", lat), "region": ("grid_index", np.ones(lon.size, bool))},
+                     "lat": ("grid_index", lat), "region": ("grid_index", np.ones(lon.size, bool)),
+                     "depth": ("grid_index", np.where(lat > 29.5, 50.0, 3000.0))},
                     {"nx": nx, "ny": ny, "dlon": 0.08, "checkpoint": "synthetic"})
     path = tmp_path / "fields.nc"
     ds.to_netcdf(path)
@@ -225,3 +226,9 @@ def test_native_grid_matches_image_order(tmp_path):
     grid, to = st.scoring_grid(ds, use_native=True)
     v = to(ds.lon.values)
     assert np.allclose(v, grid.lon[grid.mask]) and np.allclose(to(ds.lat.values), grid.lat[grid.mask])
+
+
+def test_shelf_is_not_scored(tmp_path):
+    ds = xr.open_dataset(fields_file(tmp_path, n_start=1, horizon=1))
+    grid, _ = st.scoring_grid(ds, use_native=False)
+    assert grid.lat[grid.mask].max() < 29.5 and grid.mask.sum() > 0

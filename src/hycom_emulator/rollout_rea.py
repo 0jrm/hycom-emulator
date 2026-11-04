@@ -744,7 +744,7 @@ def movie(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, 
 def fields(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, chunk: int, batch: int,
            chans: tuple[str, ...] = ("ssh",)) -> xr.Dataset:
     """<c>_model and <c>_truth (start, lead, grid_index) and <c>_start (start, grid_index), float32, NaN past a
-    start's horizon, with lon, lat and the scoring region on grid_index; grid_index = ix * ny + iy."""
+    start's horizon, with lon, lat, depth and the scoring region on grid_index; grid_index = ix * ny + iy."""
     m = load_model(config, ckpt)
     todo = start_set(m.times.astype("datetime64[D]"), horizon, starts)
     cols = [m.geo.names.index(c) for c in chans]
@@ -768,7 +768,8 @@ def fields(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int,
         data[f"{c}_start"] = (("start", "grid_index"), first[:, j])
     coords = {"start": np.array([s.date for s in todo], "datetime64[ns]"), "lead": np.arange(1, H + 1),
               "horizon": ("start", np.array([s.horizon for s in todo])), "lon": ("grid_index", st("lon")),
-              "lat": ("grid_index", st("lat")), "region": ("grid_index", m.geo.region.cpu().numpy())}
+              "lat": ("grid_index", st("lat")), "depth": ("grid_index", st("depth")),
+              "region": ("grid_index", m.geo.region.cpu().numpy())}
     dlon = float(np.median(np.diff(np.unique(np.round(st("lon"), 6)))))
     attrs = {"label": LABEL, "region_def": REGION, "checkpoint": str(ckpt), "checkpoint_md5": _md5(ckpt), "code_sha": _code_sha(),
              "chunk": chunk, "nx": m.shape[0], "ny": m.shape[1], "dlon": dlon,
