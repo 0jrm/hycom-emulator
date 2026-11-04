@@ -1,7 +1,7 @@
 """Pack the public GOMb0.04 reanalysis daily means into the folder training reads from RAM.
 
-    out/state.npy    (time, grid_index, state_feature)   float32
-    out/forcing.npy  (time, grid_index, forcing_feature) float32
+    out/state.npy    (time, grid_index, state_feature)   float32 (int16 with --dtype int16)
+    out/forcing.npy  (time, grid_index, forcing_feature) float32 (int16 with --dtype int16)
     out/meta.zarr    coordinates, static fields, boundary mask and train statistics, as pack_b00
                      writes them, plus level_ocean (grid_index, level) and time_filled (time)
 
@@ -17,6 +17,13 @@ time_filled; a gap longer than --max-gap refuses the plan.
 
 The build resumes. out/plan.json fixes the plan, out/written.npy marks finished rows, and meta.zarr
 is written last, so meta.zarr present means the pack is complete. Rerun the same command after a crash.
+
+--dtype int16 then stores state and forcing as standardised fixed point, q = round((x - mean) / std * INT16_SCALE),
+clipped at +-INT16_CLIP std (resolution 1/INT16_SCALE std, 1% of the smallest one-day change std at the 0.05 floor),
+which halves the pack and the loader's shared memory. Statistics come from the float32 rows first; each array is then
+converted in place and meta.zarr's attrs record the scale, the clip and the clipped counts last, so the attrs mark a
+finished conversion. The datastore converts back per sample. A float32 pack in the folder converts on a rerun with
+--dtype int16.
 
 Run `python -m hycom_emulator.rea_pack build <out_dir> --start YYYY-MM-DD --end YYYY-MM-DD --train-end YYYY-MM-DD`.
 `python -m hycom_emulator.rea_pack inventory` lists which days the archive holds.
@@ -44,6 +51,8 @@ from hycom_emulator.prepare_b00 import DIFF_STD_FLOOR, _Moments, _safe, _to_grid
 DEFAULT_ROOT = "/hycom/ftp/pub/BOEM/GOMb0.04/data/daily_netcdf"
 DEFAULT_TOPO = "/hycom/ftp/pub/BOEM/GOMb0.04/topo/regional.depth.a"
 FORMAT = 1
+INT16_SCALE = 2000  # counts per standard deviation
+INT16_CLIP = 16  # standard deviations
 FILL = 1e29
 # A level that sits on the sea floor can be fill on some days and valid on others (6 points at 800 m on the
 # Blake Plateau in 2001); such points take the value of the level above. More than this fraction is a bad file.
@@ -354,7 +363,9 @@ def _write_row(n: int) -> tuple[int, float]:
     return n, time.perf_counter() - t0
 
 
-def build(plan: Plan, out: Path, workers: int = 32) -> None:
+def build(plan: Plan, out: Path, workers: int = 32, dtype: str = "float32") -> None:
+    if dtype not in ("float32", "int16"):
+        raise ValueError(f"dtype {dtype!r}: use float32 or int16")
     out = Path(out)
     plan_file, meta = out / "plan.json", out / "meta.zarr"
     if plan_file.exists():
@@ -363,6 +374,11 @@ def build(plan: Plan, out: Path, workers: int = 32) -> None:
             changed = sorted(k for k in old.keys() | plan.record().keys() if old.get(k) != plan.record().get(k))
             raise ValueError(f"{out} holds another plan (differs in {changed}); use a new folder")
         if meta.is_dir() and np.load(out / "written.npy").all():
+            stored = packed_dtype(out)
+            if dtype == "float32" and stored == "int16":
+                raise ValueError(f"{out} is an int16 pack; a float32 pack needs a new folder")
+            if dtype == "int16" and stored != "int16":
+                quantize(out)
             print(f"{out}: complete", flush=True)
             return
     days, present = schedule(plan)
@@ -413,6 +429,49 @@ def build(plan: Plan, out: Path, workers: int = 32) -> None:
     mean = f", {np.mean(secs):.1f}s per row" if secs else ""
     print(f"{len(secs)} rows read, {nfill} filled in {wall:.0f}s with {workers} workers{mean}", flush=True)
     _write_meta(plan, out, days, present, grid)
+    if dtype == "int16":
+        quantize(out)
+
+
+def packed_dtype(out: Path) -> str:
+    """int16 once quantize finished (meta.zarr attrs), else float32."""
+    attrs = xr.open_zarr(Path(out) / "meta.zarr", consolidated=True).attrs
+    return "int16" if "int16_scale" in attrs else "float32"
+
+
+def quantize(out: Path, rows: int = 8) -> dict[str, int]:
+    """Convert a complete float32 pack's state and forcing to int16 fixed point in place; resumes (an array already
+    int16 is kept) and records scale, clip and clipped counts in meta.zarr's attrs last. Returns the clipped counts."""
+    import zarr
+
+    out = Path(out)
+    meta = xr.open_zarr(out / "meta.zarr", consolidated=True).load()
+    limit = INT16_SCALE * INT16_CLIP
+    clipped = {}
+    for name in PACKED:
+        path = out / f"{name}.npy"
+        src = np.load(path, mmap_mode="r")
+        if src.dtype != np.int16:
+            mean, std = (meta[f"{name}_{op}"].values.astype(np.float64) for op in ("mean", "std"))
+            tmp = out / f"{name}.npy.int16.partial"
+            dst = np.lib.format.open_memmap(tmp, mode="w+", dtype=np.int16, shape=src.shape)
+            for n in range(0, src.shape[0], rows):
+                z = np.rint((np.asarray(src[n : n + rows], np.float64) - mean) / std * INT16_SCALE)
+                dst[n : n + rows] = np.clip(z, -limit, limit).astype(np.int16)
+            dst.flush()
+            del dst, src
+            tmp.replace(path)
+        q = np.load(path, mmap_mode="r")
+        clipped[name] = int(sum(np.count_nonzero(np.abs(q[n : n + rows].astype(np.int32)) >= limit) for n in range(0, q.shape[0], rows)))
+        print(f"{name}: int16, {clipped[name]} values at the +-{INT16_CLIP} std clip", flush=True)
+    group = zarr.open_group(out / "meta.zarr", mode="r+")
+    group.attrs.update({"int16_scale": INT16_SCALE, "int16_clip": INT16_CLIP,
+                        **{f"int16_clipped_{k}": v for k, v in clipped.items()}})
+    zarr.consolidate_metadata(out / "meta.zarr")
+    return clipped
+
+
+PACKED = ("state", "forcing")
 
 
 def _fill_missing(out: Path, days: np.ndarray, present: np.ndarray, written: np.memmap, grid: Grid) -> int:
@@ -555,13 +614,15 @@ def main() -> None:
     b.add_argument("--band", type=int, default=20)
     b.add_argument("--max-gap", type=int, default=3)
     b.add_argument("--workers", type=int, default=32, help="parallel readers; keep under 64 on the shared server")
+    b.add_argument("--dtype", choices=("float32", "int16"), default="float32",
+                   help="int16: standardised fixed point (half the size), converted after the float32 build")
     a = p.parse_args()
     if a.cmd == "inventory":
         inventory(a.root, a.start, a.end)
         return
     plan = Plan(root=a.root, start=a.start, end=a.end, train_end=a.train_end, depths=tuple(float(d) for d in a.levels),
                 stride=a.stride, band=a.band, max_gap=a.max_gap, topo=a.topo)
-    build(plan, a.out, a.workers)
+    build(plan, a.out, a.workers, a.dtype)
 
 
 if __name__ == "__main__":

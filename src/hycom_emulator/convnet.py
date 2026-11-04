@@ -27,8 +27,8 @@ together: in emu-b00-053-conv the unet arm's decoder output grew from ~1 to ~38 
 saturated the output MLP and froze the training loss at 1.1094.
 
 Settings: the datastore config's `conv` section, {blocks, channel_attention, stride, norm}.
-REA_ARCHS holds the reanalysis emulator's settings; `python -m hycom_emulator.convnet arch <name> <rea.yaml>` writes
-the conv section into the datastore config and prints the train_model arguments (train_rea.sh ARCH=<name>).
+REA_ARCHS holds the reanalysis emulator's settings, conv and rcan (hycom_emulator.rcan) alike; `python -m hycom_emulator.convnet arch <name> <rea.yaml>` writes
+the conv or rcan section into the datastore config and prints the train_model arguments (train_rea.sh ARCH=<name>).
 Importing this module registers `conv_graph_lam` and `hycom_conv_graph_lam` (with the
 prediction-time thickness projection) with neural-lam, and everything physics registers.
 """
@@ -68,6 +68,22 @@ REA_ARCHS = {
 }
 
 
+def _rcan(*levels):
+    """An rcan section (hycom_emulator.rcan) with F = 128 for (cell_deg, enc groups, enc blocks, dec groups, dec blocks)."""
+    return {"width": 128, "channel_attention": True, "reduction": 16, "norm": True, "checkpoint_blocks": True, "tile": None,
+            "levels": [{"cell_deg": c, "enc": [eg, eb], "dec": [dg, db]} for c, eg, eb, dg, db in levels]}
+
+
+# RCAN pyramids around the same mesh, coupled at 0.16 deg cells (docs/plan-2026-11-04-rcan-graph-emulator.md 3.2):
+# rcan_s2 and rcan_s2_light on the stride-2 pack (0.08 deg), rcan_s1 on the stride-1 pack with a new 0.04 deg level.
+REA_ARCHS |= {
+    "rcan_s2": {"model": "rcan_graph_lam", "graph": "multiscale_s2", "rcan": _rcan((0.08, 2, 3, 2, 3), (0.16, 1, 3, 1, 3))},
+    "rcan_s2_light": {"model": "rcan_graph_lam", "graph": "multiscale_s2", "rcan": _rcan((0.08, 1, 3, 1, 3), (0.16, 1, 3, 1, 3))},
+    "rcan_s1": {"model": "rcan_graph_lam", "graph": "multiscale_s4",
+                "rcan": _rcan((0.04, 1, 3, 1, 3), (0.08, 2, 3, 2, 3), (0.16, 1, 3, 1, 3))},
+}
+
+
 @dataclass(frozen=True)
 class ConvSettings:
     blocks: int = 3
@@ -77,14 +93,14 @@ class ConvSettings:
 
 
 class ResBlock(nn.Module):
-    def __init__(self, width: int, channel_attention: bool, norm: bool):
+    def __init__(self, width: int, channel_attention: bool, norm: bool, reduction: int = 16):
         super().__init__()
         self.norm = nn.LayerNorm(width) if norm else None
         self.conv1 = nn.Conv2d(width + 1, width, 3, padding=1)
         self.conv2 = nn.Conv2d(width, width, 3, padding=1)
         nn.init.zeros_(self.conv2.weight)
         nn.init.zeros_(self.conv2.bias)
-        squeeze = max(width // 16, 1)
+        squeeze = max(width // reduction, 1)
         self.attention = (
             nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Conv2d(width, squeeze, 1), nn.SiLU(), nn.Conv2d(squeeze, width, 1), nn.Sigmoid())
             if channel_attention else None
@@ -219,26 +235,32 @@ def mesh_spacing(mesh_xy: np.ndarray) -> float:
     return float(steps[steps > 1e-6 * (x[-1] - x[0])].min())
 
 
-def coarse_graph(graph_dir: Path, xy: np.ndarray, stride: int) -> Path:
-    """graph_dir's mesh with grid edges for the stride x stride cells of xy (nx, ny, 2); idempotent."""
-    out = graph_dir.with_name(f"{graph_dir.name}_s{stride}")
+def graph_on_grid(mesh_dir: Path, grid_xy: np.ndarray, out: Path) -> Path:
+    """mesh_dir's mesh with g2m and m2g rebuilt for grid nodes grid_xy (N, 2) by neural-lam's rules, written to out;
+    idempotent (an existing out is kept)."""
     if (out / "m2g_features.pt").is_file():
         return out
     tmp = out.with_name(out.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
-    shutil.copytree(graph_dir, tmp)
-    mesh_xy = torch.load(graph_dir / "mesh_features.pt", weights_only=True)[0].numpy()
-    for name, (index, feats) in grid_edges(cell_centres(xy, stride).reshape(-1, 2), mesh_xy, mesh_spacing(mesh_xy)).items():
+    shutil.copytree(mesh_dir, tmp)
+    mesh_xy = torch.load(mesh_dir / "mesh_features.pt", weights_only=True)[0].numpy()
+    for name, (index, feats) in grid_edges(grid_xy, mesh_xy, mesh_spacing(mesh_xy)).items():
         torch.save(index, tmp / f"{name}_edge_index.pt")
         torch.save(feats, tmp / f"{name}_features.pt")
     tmp.rename(out)
     return out
 
 
+def coarse_graph(graph_dir: Path, xy: np.ndarray, stride: int) -> Path:
+    """graph_dir's mesh with grid edges for the stride x stride cells of xy (nx, ny, 2); idempotent."""
+    return graph_on_grid(graph_dir, cell_centres(xy, stride).reshape(-1, 2), graph_dir.with_name(f"{graph_dir.name}_s{stride}"))
+
+
 def apply_arch(name: str, config_path) -> list[str]:
-    """Write REA_ARCHS[name]'s conv section into the datastore config; return its train_model arguments."""
+    """Write REA_ARCHS[name]'s conv or rcan section into the datastore config; return its train_model arguments."""
     spec = REA_ARCHS[name]
-    cfg = yaml.safe_load(open(config_path)) | {"conv": spec["conv"]}
+    section = "conv" if "conv" in spec else "rcan"
+    cfg = yaml.safe_load(open(config_path)) | {section: spec[section]}
     yaml.safe_dump(cfg, open(config_path, "w"), sort_keys=False)
     return ["--model", spec["model"], "--graph", spec["graph"]]
 

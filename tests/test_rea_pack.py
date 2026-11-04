@@ -363,3 +363,65 @@ def test_a_missing_surface_point_or_many_missing_points_raise():
     many_lost[:, 2, :10, :] = np.nan
     with pytest.raises(ValueError, match="a bad file"):
         rea_pack.assemble((many_lost, surface, np.zeros((2, 40, 40))), np.datetime64("2001-03-03"), _grid(ocean))
+
+
+def _datastore(out):
+    from hycom_emulator.datastore import HycomDatastore
+
+    cfg = out.parent / f"{out.name}.yaml"
+    cfg.write_text(
+        f"zarr: {out}\nsplits:\n  train: [2010-12-29, 2011-01-02]\n  val: [2011-01-03, 2011-01-04]\n"
+        "  test: [2011-01-03, 2011-01-04]\n"
+    )
+    return HycomDatastore(cfg)
+
+
+def test_int16_pack_round_trips_within_half_a_step(pack, archive, tmp_path):
+    """A float32 pack rerun with --dtype int16 converts in place; the datastore reads it back within 0.0005 std of
+    the float32 values (rounding is 1/4000 std), and per-sample indexing gives the same numbers."""
+    pytest.importorskip("neural_lam")
+    out, _ = pack
+    q = tmp_path / "q"
+    shutil.copytree(out, q)
+    build(plan_for(archive[0]), q, workers=1, dtype="int16")
+    assert np.load(q / "state.npy", mmap_mode="r").dtype == np.int16 == np.load(q / "forcing.npy", mmap_mode="r").dtype
+    attrs = _meta(q).attrs
+    assert attrs["int16_scale"] == rea_pack.INT16_SCALE and attrs["int16_clipped_state"] == 0
+    assert rea_pack.packed_dtype(q) == "int16" and rea_pack.packed_dtype(out) == "float32"
+    meta = _meta(out)
+    for name in rea_pack.PACKED:
+        a = _datastore(out).get_dataarray(name, "train")
+        b = _datastore(q).get_dataarray(name, "train")
+        assert b.dtype == np.float32
+        err = np.abs(b.values - a.values) / meta[f"{name}_std"].values
+        assert err.max() <= 0.0005, name
+        np.testing.assert_array_equal(b.isel(time=2, grid_index=slice(3, 9)).values, b.values[2, 3:9])
+        np.testing.assert_array_equal(b.isel(time=1)[:, 4].values, b.values[1, :, 4])
+    import torch
+    from neural_lam.weather_dataset import WeatherDataset
+
+    items = [WeatherDataset(_datastore(p), split="train", ar_steps=1)[0] for p in (out, q)]
+    for a, b in zip(*items):
+        if a.dtype.is_floating_point:  # init, target and forcing windows in physical units, as the float32 pack's
+            assert b.dtype == a.dtype and b.shape == a.shape
+            torch.testing.assert_close(b, a, rtol=0, atol=0.0005 * float(a.abs().max()))
+    build(plan_for(archive[0]), q, workers=1, dtype="int16")  # complete: nothing to do
+    with pytest.raises(ValueError, match="int16 pack"):
+        build(plan_for(archive[0]), q, workers=1)
+
+
+def test_int16_clips_beyond_16_std_and_counts(pack, tmp_path):
+    out, _ = pack
+    q = tmp_path / "c"
+    shutil.copytree(out, q)
+    meta = _meta(out)
+    mean, std = float(meta.state_mean[3]), float(meta.state_std[3])
+    st = np.load(q / "state.npy", mmap_mode="r+")
+    st[1, 5, 3], st[2, 6, 3] = mean + 20 * std, mean - 17 * std
+    st.flush()
+    del st
+    assert rea_pack.quantize(q) == {"state": 2, "forcing": 0}
+    qs = np.load(q / "state.npy")
+    assert qs[1, 5, 3] == 16 * rea_pack.INT16_SCALE and qs[2, 6, 3] == -16 * rea_pack.INT16_SCALE
+    assert _meta(q).attrs["int16_clipped_state"] == 2
+    assert rea_pack.quantize(q) == {"state": 2, "forcing": 0}  # rerun keeps the int16 arrays and recounts

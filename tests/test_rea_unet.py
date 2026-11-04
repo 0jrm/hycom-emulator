@@ -86,7 +86,7 @@ def test_arch_writes_the_conv_section(rea, tmp_path):
     cfg = HycomDatastore(tmp_path / "r.yaml").config
     assert cfg["conv"] == {"blocks": 3, "channel_attention": True, "stride": 2, "norm": True}
     assert cfg["splits"]["train"] and nlam_yaml.is_file()
-    for spec in REA_ARCHS.values():
+    for spec in (s for s in REA_ARCHS.values() if "conv" in s):
         assert spec["graph"].endswith(f"_s{spec['conv']['stride']}") and spec["conv"]["norm"]
 
 
@@ -128,3 +128,35 @@ def test_unet_norm_takes_every_graph_lam_weight(rea):
     x = _inputs(ds)
     y = unet(*x)[0]
     assert y.shape == x[0].shape and torch.isfinite(y).all()
+
+
+def _edges(index):
+    return sorted(map(tuple, index.T.tolist()))
+
+
+def test_mesh_from_takes_the_mesh_and_rebuilds_the_grid_edges(rea, archive, tmp_path):  # noqa: F811
+    """On its own grid, a mesh_from graph is create_graph's graph (same mesh files, the same g2m and m2g edges). The
+    stride-2 pack (7 x 6, too small for create_graph's mesh levels) keeps the mesh and links each grid node to its 4
+    nearest mesh nodes; its _s2 graph is built on that."""
+    from hycom_emulator.nlam import build_graph
+    from hycom_emulator.rea_pack import build
+
+    root, _, _ = rea
+    source = root / "graph" / "multiscale"
+    build_graph(str(root / "nlam_a.yaml"), "copy", mesh_from=str(source))
+    out2 = tmp_path / "p2"
+    build(plan_for(archive[0], stride=2), out2, workers=1)
+    build_graph(str(_config(tmp_path, out2, "c")), "multiscale_s2", mesh_from=str(source))
+    small = tmp_path / "graph" / "multiscale"
+    for other in (root / "graph" / "copy", small, tmp_path / "graph" / "multiscale_s2"):
+        for f in source.glob("*.pt"):
+            if not f.name.startswith(("g2m", "m2g")):
+                a, b = torch.load(f, weights_only=True), torch.load(other / f.name, weights_only=True)
+                assert all(torch.equal(x, y) for x, y in zip(a, b)) if isinstance(a, list) else torch.equal(a, b), f.name
+    load = lambda d, n: torch.load(d / f"{n}_edge_index.pt", weights_only=True)  # noqa: E731
+    for n in ("g2m", "m2g"):
+        assert _edges(load(root / "graph" / "copy", n)) == _edges(load(source, n)), n
+    assert np.bincount(load(small, "m2g")[1].numpy()).tolist() == [4] * (NX // 2) * (NY // 2)
+    assert np.bincount(load(tmp_path / "graph" / "multiscale_s2", "m2g")[1].numpy()).tolist() == [4] * 12
+    with pytest.raises(SystemExit, match="mesh_features"):
+        build_graph(str(root / "nlam_a.yaml"), "nothing", mesh_from=str(root))

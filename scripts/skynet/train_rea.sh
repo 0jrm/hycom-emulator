@@ -11,7 +11,7 @@
 # last learning rate sets that stage's starting rate by the same rule. PF_<days> is the stage's --pushforward (default 4 from 8 days on, else 0; FIRST=1 adds
 # --train_first_step), CKPT_<days>=1 its --checkpoint_steps (default from 16 days on). The test split is then scored
 # over the last stage's validation horizon with neural-lam's own per-lead metrics.
-# ARCH=<name of hycom_emulator.convnet.REA_ARCHS> trains that architecture instead of graph_lam (e.g. unet_norm: option
+# ARCH=<name of hycom_emulator.convnet.REA_ARCHS> trains that architecture instead of graph_lam (e.g. rcan_s2, or unet_norm: option
 # B's pre-norm U-Net level around the same mesh; a graph_lam START_CKPT loads into it with the conv blocks at identity).
 # EXCLUDE_SOURCE_CHANGES=1 drops train windows that straddle a change of reanalysis experiment.
 # Overrides: ARCH, GPU, BS, HIDDEN, LAYERS, LR, WORKERS, PRECISION, STAGES, EPOCHS_/CAP_/EVAL_/PF_/CKPT_<days>, FIRST,
