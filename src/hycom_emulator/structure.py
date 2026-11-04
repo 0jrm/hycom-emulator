@@ -407,6 +407,13 @@ def separations(days: list[LCDay], grid: Grid, floor: float = LC_FLOOR_M, before
     return events
 
 
+def event_sizes(ev: Event, days: list[LCDay], grid: Grid) -> dict:
+    """Areas (km2) of the detached piece, the LC the day before and the day of detachment, and the piece's peak (m)."""
+    km2 = grid.cell_km2[grid.mask]
+    return {"ring_km2": float(km2[ev.footprint].sum()), "lc_before_km2": float(km2[days[ev.detached - 1].lc].sum()),
+            "lc_after_km2": float(km2[days[ev.detached].lc].sum()), "ring_peak_m": float(days[ev.detached].h[ev.footprint].max())}
+
+
 def _no_run_possible(ev: Event, last: int, floor: float) -> bool:
     """A rejoin run still open at the series end could reach REJOIN_DAYS + 1 only if it started by day 30."""
     run = 0
@@ -478,8 +485,8 @@ def score(fields: Path, out: Path, use_native: bool = False, floor: float | None
             for ev in separations(days, grid, lc_floor):
                 events.append({"start": str(s)[:10], "who": who, "detached_lead": ev.detached,
                                "detached": str(np.datetime64(str(s)[:10]) + np.timedelta64(ev.detached, "D")), "status": ev.status,
-                               "rejoined_lead": ev.rejoined, "neck": {int(k) - ev.detached: v for k, v in sorted(ev.neck.items())},
-                               "lc_area_km2_seed_day": float(grid.cell_km2[grid.mask][days[ev.detached].lc].sum())})
+                               "rejoined_lead": ev.rejoined, **event_sizes(ev, days, grid),
+                               "neck": {int(k) - ev.detached: v for k, v in sorted(ev.neck.items())}})
     keys = list(rows[0][0])
     lead = np.arange(1, int(ds.horizon.max()) + 1)
     data = {k: (("start", "lead"), np.array([[r[l][k] if l < len(r) else np.nan for l in range(len(lead))] for r in rows]))
@@ -513,7 +520,7 @@ def truth_series(pack: Path, out: Path, t_from: str, t_to: str, floor: float = L
     days = [lc_day(x, r.grid, box) for x in h]
     evs = separations(days, r.grid, floor)
     res = [{"detached": str(times[rows[ev.detached]]), "status": ev.status,
-            "rejoined": str(times[rows[ev.rejoined]]) if ev.rejoined is not None else None,
+            "rejoined": str(times[rows[ev.rejoined]]) if ev.rejoined is not None else None, **event_sizes(ev, days, r.grid),
             "neck": {int(k) - ev.detached: v for k, v in sorted(ev.neck.items())}} for ev in evs]
     out.mkdir(parents=True, exist_ok=True)
     census_rows = [{k: census(d, EDDY_FLOOR_M)["count"] for k, d in diagrams(x, r.grid.g).items()} for x in h]
