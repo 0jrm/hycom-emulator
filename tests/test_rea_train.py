@@ -128,6 +128,7 @@ def test_split_args_takes_our_flags_and_leaves_neural_lams():
     ["--plateau", "3", "2"],
     ["--plateau", "0", "2"],
     ["--plateau", "2", "3", "--lr_decay", "1"],
+    ["--warmup", "-1"],
 ])
 def test_split_args_refuses_an_inconsistent_set(argv):
     with pytest.raises(SystemExit):
@@ -188,6 +189,27 @@ def test_lightning_shim_turns_determinism_off_and_adds_plateau():
     assert kwargs["callbacks"][0] == "ckpt" and isinstance(kwargs["callbacks"][1], rea_train.Plateau)
     assert shim.callbacks == "callbacks module", "everything else is pytorch_lightning's"
     assert rea_train._Lightning(FakePL, Options(plateau=(2, 3))).Trainer(deterministic=True)["deterministic"] is True
+    callbacks = rea_train._Lightning(FakePL, Options(warmup=500, plateau=(2, 3))).Trainer(callbacks=["ckpt"])["callbacks"]
+    assert [type(c) for c in callbacks[1:]] == [rea_train.Warmup, rea_train.Plateau] and callbacks[1].steps == 500
+
+
+def test_warmup_ramps_linearly_and_keeps_a_decay_applied_meanwhile():
+    class Trainer:
+        optimizers = [torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=1e-3)]
+
+    t, w = Trainer(), rea_train.Warmup(4)
+    group = t.optimizers[0].param_groups[0]
+    seen = []
+    for k in range(6):
+        w.on_train_batch_start(t, None, None, k)
+        seen.append(group["lr"])
+        if k == 1:
+            group["lr"] *= 0.5  # a Plateau decay after batch 1
+    assert seen == pytest.approx([2.5e-4, 5e-4, 3.75e-4, 5e-4, 5e-4, 5e-4])
+    resumed = rea_train.Warmup(4)
+    resumed.load_state_dict(w.state_dict())
+    assert resumed.done == 4
+    assert split_args(["--warmup", "500", "--lr", "5e-4"]) == (Options(warmup=500), ["--lr", "5e-4"])
 
 
 def test_install_compiles_the_predictor_in_place(monkeypatch):
