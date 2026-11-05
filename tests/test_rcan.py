@@ -79,8 +79,8 @@ def test_one_level_starts_as_graph_lam(rea):
 @pytest.mark.parametrize("levels, graph", [(ONE, "multiscale"), (TWO, "multiscale_s2")])
 def test_an_input_outlier_cannot_grow_the_residual_stream(rea, levels, graph):
     """A state channel at 1000 sigma at one cell moves the fine level's input there by a bounded amount: the head
-    writes into the stream through a LayerNorm, as GraphLAM's grid embedder does. Without it a free run fed back a
-    1250 m bottom cell at 35 sigma linearly and grew without bound (emu-rea-rcan, 2026-11-04)."""
+    reads its input clipped, and GraphLAM's grid embedder ends in a LayerNorm. Unclipped, a free run fed back a 1250 m
+    bottom cell at 35 sigma linearly and grew without bound (emu-rea-rcan, 2026-11-04)."""
     root, out, _ = rea
     model, ds = _model(root, out, f"outlier{len(levels)}", levels, graph)
     _perturb(model)
