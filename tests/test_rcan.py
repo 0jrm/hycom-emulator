@@ -11,7 +11,7 @@ from test_rea_pack import NX, NY, archive, pack, plan_for  # noqa: F401  fixture
 from test_rea_unet import HIDDEN, _config, _datastore
 
 from hycom_emulator.convnet import REA_ARCHS, _image, _nodes, apply_arch
-from hycom_emulator.rcan import (PixelShuffleUp, RcanGraphLAM, SpaceToDepth, Level, level_key, level_strides)
+from hycom_emulator.rcan import (RCAN_MODULES, PixelShuffleUp, RcanGraphLAM, SpaceToDepth, Level, level_key, level_strides)
 from hycom_emulator.rea_pack import build
 
 pytest.importorskip("neural_lam")
@@ -60,7 +60,7 @@ def _perturb(model, seed=2, scale=0.05):
     g = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         for name, p in model.named_parameters():
-            if name.startswith(("head.", "levels.")):
+            if name.startswith(RCAN_MODULES):
                 p.add_(scale * torch.randn(p.shape, generator=g))
 
 
@@ -74,6 +74,25 @@ def test_one_level_starts_as_graph_lam(rea):
     model.load_state_dict(parent.state_dict(), strict=True)
     x = _inputs(ds, NX * NY)
     torch.testing.assert_close(model(*x)[0], parent(*x)[0], rtol=0, atol=1e-5)
+
+
+@pytest.mark.parametrize("levels, graph", [(ONE, "multiscale"), (TWO, "multiscale_s2")])
+def test_an_input_outlier_cannot_grow_the_residual_stream(rea, levels, graph):
+    """A state channel at 1000 sigma at one cell moves the fine level's input there by a bounded amount: the head
+    writes into the stream through a LayerNorm, as GraphLAM's grid embedder does. Without it a free run fed back a
+    1250 m bottom cell at 35 sigma linearly and grew without bound (emu-rea-rcan, 2026-11-04)."""
+    root, out, _ = rea
+    model, ds = _model(root, out, f"outlier{len(levels)}", levels, graph)
+    _perturb(model)
+    seen = []
+    model.levels[level_key(levels[0][0])].enc.register_forward_hook(lambda mod, i, o: seen.append(i[0][0, :, 3, 4].norm()))
+    x = _inputs(ds, NX * NY)
+    big = x[0].clone()
+    big[0, 3 * NY + 4, 0] = 1000.0
+    with torch.no_grad():
+        model(*x)
+        model(big, *x[1:])
+    assert seen[1] < 5 * seen[0], f"stream at the outlier cell grew {float(seen[1] / seen[0]):.0f}x"
 
 
 def test_two_levels_start_as_graph_lam_on_cell_means(rea):
