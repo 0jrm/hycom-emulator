@@ -4,13 +4,14 @@ GraphLAM's grid path is pointwise, so change below the mesh scale (~28 km) is a 
 fronts come out smooth (docs/plan-2026-11-04-rcan-graph-emulator.md). RcanGraphLAM keeps every GraphLAM module and
 puts index-space conv levels between the grid and the mesh:
 
-    h0 = grid_embedder(x) + head(x)                   head: conv3x3 over the 2 states, forcing windows and statics
+    h0 = grid_embedder(x)                             the one entry into the stream: an MLP ending in a LayerNorm
     e0 = enc0(h0); ek = enck(down_k(e(k-1)))          down: space-to-depth by s_k, 1x1 conv, starts as the cell mean
     cn = nodes(eK); rep = cn + encoding_grid_mlp(cn)  K: the mesh-coupled level (its cells are the graph's grid nodes)
     msg = m2g_gnn(process(g2m_gnn(cn)), rep) - rep    GraphLAM, unchanged
     dK = decK(image(msg) + skipK(eK))
     dk = deck(up_k(d(k+1)) + skip_k(ek))              up: conv3x3 to s^2 F channels and pixel shuffle, starts as nearest
-    out = output_map(nodes(e0) + encoding_grid_mlp(nodes(e0)) + nodes(d0))
+    out = output_map(nodes(e0) + encoding_grid_mlp(nodes(e0)) + nodes(up(msg)) + exit(LN(nodes(d0))))
+                                                      up(msg): the message replicated to the grid; exit: 1x1, zero at init
 
 Each enc/dec is RCAN's residual-in-residual module: groups of convnet.ResBlock (pre-norm, conv-SiLU-conv, squeeze-excite)
 with a group conv on each group's skip and a zero-initialised conv on the long skip. With `norm`, every conv whose
@@ -18,17 +19,25 @@ output joins the residual stream reads it through a per-point LayerNorm: the gro
 skips too, not only the blocks. Without it, the long-skip conv's first Adam steps move all 1152 taps by about lr with
 one sign, its output grows with the stream it reads, and rcan_s2 diverged from scratch at lr 1e-3 (probe 2026-11-04:
 1-day train loss 1.5 to 5.4 in three steps while graph_lam fell to 0.8; with the long-skip convs held at zero it
-tracked graph_lam). With head, the long-skip convs and
-the level skips at zero, every level starts as the identity and a GraphLAM checkpoint loads into the model as
-GraphLAM's step with the mesh reading cell means and its message written back by nearest replication. With one level
-(coupled at the grid) that is GraphLAM's step exactly. The decoders carry the mesh message, and the fine
-representation enters at the output as in GraphLAM, so a model grown by a finer level starts as the coarser model.
+tracked graph_lam).
+
+The stream is bounded at both ends (docs/redesign-2026-11-04-rcan-first-principles.md 2.1). It has one entry, the
+grid embedder, whose last op is a LayerNorm: the first build also added a bare conv3x3 of the raw input (`head`), and
+a free run fed a 1250 m bottom cell at 35 sigma back through it linearly until it blew up (emu-rea-rcan incident 2).
+And the decoder writes into the output sum through a per-point LayerNorm and a zero-initialised 1x1 conv (`exit`),
+beside the mesh message replicated to the grid, so the output map's input is bounded by the exit's weights however
+the decoder's stream grows (rcan_s2 probe: that input's RMS went 1.8 to 7.5 in 30 steps with no exit norm). With the
+long-skip convs, the level skips and the exit at zero, every level starts as the identity and a GraphLAM checkpoint
+loads into the model as GraphLAM's step with the mesh reading cell means and its message written back by nearest
+replication. With one level (coupled at the grid) that is GraphLAM's step exactly. The fine representation enters
+at the output as in GraphLAM, so a model grown by a finer level starts as the coarser model.
 
 Levels are keyed by cell size (`cell_<deg>`), so a checkpoint loads into a model with more (finer) levels: weights of
 the levels it has load, the new level starts at the identity, and every GraphLAM weight carries over.
 
 Settings: the datastore config's `rcan` section, {width, levels: [{cell_deg, enc: [groups, blocks], dec: [groups,
-blocks]}], channel_attention, reduction, norm, checkpoint_blocks, tile: {size, halo} | null}. Levels run fine to
+blocks], channel_attention}], channel_attention, reduction, norm, checkpoint_blocks, tile: {size, halo} | null}; a
+level's `channel_attention`, when given, overrides the section's. Levels run fine to
 coarse; the first is the grid spacing, each next one a whole multiple of the previous; the graph's grid side must be
 the last level's cells (`<graph>_s<total stride>`, built by `nlam build_graph`). `tile` runs the finest level's encoder
 and decoder on tiles with a halo, each tile checkpointed when checkpoint_blocks is set; a tile is exact when the halo
@@ -50,7 +59,7 @@ from torch.utils.checkpoint import checkpoint
 
 from hycom_emulator.convnet import ResBlock, _image, _nodes
 
-RCAN_MODULES = ("head.", "levels.")
+RCAN_MODULES = ("levels.", "exit")  # exit_norm. and exit.
 STRIDE_TOLERANCE = 0.02  # relative: a level's cell may differ from a whole multiple of the previous one by this much
 
 
@@ -59,6 +68,7 @@ class Level:
     cell_deg: float
     enc: tuple[int, int]  # groups, blocks per group
     dec: tuple[int, int]
+    channel_attention: bool | None = None  # None: the section's
 
 
 @dataclass(frozen=True)
@@ -79,7 +89,8 @@ class RcanSettings:
 
     @classmethod
     def parse(cls, cfg: dict) -> RcanSettings:
-        levels = tuple(Level(float(v["cell_deg"]), tuple(v["enc"]), tuple(v["dec"])) for v in cfg["levels"])
+        levels = tuple(Level(float(v["cell_deg"]), tuple(v["enc"]), tuple(v["dec"]), v.get("channel_attention"))
+                       for v in cfg["levels"])
         rest = {k: v for k, v in cfg.items() if k not in ("levels", "tile")}
         return cls(levels=levels, tile=Tile(**cfg["tile"]) if cfg.get("tile") else None, **rest)
 
@@ -192,7 +203,8 @@ class PixelShuffleUp(nn.Module):
 class RcanLevel(nn.Module):
     def __init__(self, width: int, level: Level, down: int | None, up: int | None, cfg: RcanSettings):
         super().__init__()
-        rir = lambda groups, blocks: RIR(width, groups, blocks, cfg.channel_attention, cfg.norm, cfg.reduction)  # noqa: E731
+        ca = cfg.channel_attention if level.channel_attention is None else level.channel_attention
+        rir = lambda groups, blocks: RIR(width, groups, blocks, ca, cfg.norm, cfg.reduction)  # noqa: E731
         self.enc, self.dec = rir(*level.enc), rir(*level.dec)
         self.skip_norm = nn.LayerNorm(width) if cfg.norm else None
         self.skip = nn.Conv2d(width, width, 1)
@@ -202,6 +214,11 @@ class RcanLevel(nn.Module):
             self.down = SpaceToDepth(width, down)
         if up is not None:
             self.up = PixelShuffleUp(width, up)
+
+
+def _nearest(img: torch.Tensor, s: int, size: tuple[int, int]) -> torch.Tensor:
+    """Each cell's value on its s x s points, cropped to size (what PixelShuffleUp is at init)."""
+    return img.repeat_interleave(s, -2).repeat_interleave(s, -1)[..., : size[0], : size[1]]
 
 
 def _tiled(fn, h, mask, tile: Tile, checkpoint_tiles: bool):
@@ -244,9 +261,10 @@ class RcanGraphLAM(GraphLAM):
         for k, s in enumerate(self.strides):
             mask = F.max_pool2d(_pad(mask, s), s) if k else mask
             self.register_buffer(f"mask{k}", mask, persistent=False)
-        self.head = nn.Conv2d(self.grid_input_dim, width, 3, padding=1)
-        nn.init.zeros_(self.head.weight)
-        nn.init.zeros_(self.head.bias)
+        self.exit_norm = nn.LayerNorm(width)
+        self.exit = nn.Linear(width, width)  # a 1x1 conv on nodes
+        nn.init.zeros_(self.exit.weight)
+        nn.init.zeros_(self.exit.bias)
         last = len(cfg.levels) - 1
         self.levels = nn.ModuleDict({
             level_key(v.cell_deg): RcanLevel(width, v, self.strides[k] if k else None,
@@ -266,7 +284,7 @@ class RcanGraphLAM(GraphLAM):
         x = torch.cat((prev_state, prev_prev_state, forcing, self.expand_to_batch(self.grid_static_features, batch_size)), -1)
         nx, ny = self.sizes[0]
         levels = list(self.levels.values())
-        h = _image(self.grid_embedder(x), nx, ny) + self.head(_image(x, nx, ny))
+        h = _image(self.grid_embedder(x), nx, ny)
         enc = []
         for k, level in enumerate(levels):
             if k:
@@ -279,12 +297,14 @@ class RcanGraphLAM(GraphLAM):
         mesh_rep = self.process_step(mesh_rep)
         message = self.m2g_gnn(mesh_rep, rep, self.expand_to_batch(self.m2g_embedder(self.m2g_features), batch_size)) - rep
         d = _image(message, *self.sizes[-1])
+        up = d
         for k in reversed(range(len(levels))):
             if k < len(levels) - 1:
                 d = levels[k].up(d)[..., : self.sizes[k][0], : self.sizes[k][1]]
+                up = _nearest(up, self.strides[k + 1], self.sizes[k])
             d = self._rir(levels[k].dec, d + levels[k].skip(_norm(levels[k].skip_norm, enc[k])), k)
         fine = _nodes(enc[0])
-        net_output = self.output_map(fine + self.encoding_grid_mlp(fine) + _nodes(d))
+        net_output = self.output_map(fine + self.encoding_grid_mlp(fine) + _nodes(up) + self.exit(self.exit_norm(_nodes(d))))
         if self.output_std:
             pred_delta_mean, pred_std_raw = net_output.chunk(2, dim=-1)
             pred_std = F.softplus(pred_std_raw)

@@ -78,21 +78,39 @@ def test_one_level_starts_as_graph_lam(rea):
 
 @pytest.mark.parametrize("levels, graph", [(ONE, "multiscale"), (TWO, "multiscale_s2")])
 def test_an_input_outlier_cannot_grow_the_residual_stream(rea, levels, graph):
-    """A state channel at 1000 sigma at one cell moves the fine level's input there by a bounded amount: the head
-    writes into the stream through a LayerNorm, as GraphLAM's grid embedder does. Without it a free run fed back a
-    1250 m bottom cell at 35 sigma linearly and grew without bound (emu-rea-rcan, 2026-11-04)."""
+    """A state channel at 1000 sigma at one cell moves the fine level's input and the output map's input there by a
+    bounded amount, with no clip: the stream's one entry is the grid embedder, which ends in a LayerNorm, and the
+    decoder writes into the output through one. The first build's head, a bare conv3x3 of the raw input, fed a 1250 m
+    bottom cell at 35 sigma back linearly and a free run grew without bound (emu-rea-rcan, 2026-11-04)."""
     root, out, _ = rea
     model, ds = _model(root, out, f"outlier{len(levels)}", levels, graph)
     _perturb(model)
-    seen = []
-    model.levels[level_key(levels[0][0])].enc.register_forward_hook(lambda mod, i, o: seen.append(i[0][0, :, 3, 4].norm()))
+    with torch.no_grad():
+        model.exit.weight.add_(0.05 * torch.randn_like(model.exit.weight))
+    stream, output = [], []
+    cell = 3 * NY + 4
+    model.levels[level_key(levels[0][0])].enc.register_forward_hook(lambda mod, i, o: stream.append(i[0][0, :, 3, 4].norm()))
+    model.output_map.register_forward_hook(lambda mod, i, o: output.append(i[0][0, cell].norm()))
     x = _inputs(ds, NX * NY)
     big = x[0].clone()
-    big[0, 3 * NY + 4, 0] = 1000.0
+    big[0, cell, 0] = 1000.0
     with torch.no_grad():
         model(*x)
         model(big, *x[1:])
-    assert seen[1] < 5 * seen[0], f"stream at the outlier cell grew {float(seen[1] / seen[0]):.0f}x"
+    assert stream[1] < 5 * stream[0], f"stream at the outlier cell grew {float(stream[1] / stream[0]):.0f}x"
+    assert output[1] < 5 * output[0], f"output map input at the outlier cell grew {float(output[1] / output[0]):.0f}x"
+
+
+def test_channel_attention_is_set_per_level(rea):
+    """A level's channel_attention overrides the section's: rcan_s2_v2 keeps the 0.08 deg level a local operator."""
+    root, out, _ = rea
+    cfg = yaml.safe_load(_rcan(*SMALL))
+    cfg["rcan"]["levels"][0]["channel_attention"] = False
+    ds = _datastore(_config(root, out, "ca", yaml.safe_dump(cfg, sort_keys=False)))
+    model = RcanGraphLAM(datastore=ds, graph_name="multiscale_s2", hidden_dim=HIDDEN, processor_layers=2)
+    for cell, expected in ((0.5, False), (1.0, True)):
+        level = model.levels[level_key(cell)]
+        assert {b.attention is not None for rir in (level.enc, level.dec) for g in rir.groups for b in g.blocks} == {expected}
 
 
 def test_two_levels_start_as_graph_lam_on_cell_means(rea):
@@ -210,9 +228,11 @@ def test_arch_writes_the_rcan_section(rea, tmp_path):
     assert apply_arch("rcan_s2", tmp_path / "r.yaml") == ["--model", "rcan_graph_lam", "--graph", "multiscale_s2"]
     cfg = HycomDatastore(tmp_path / "r.yaml").config
     assert cfg["rcan"] == REA_ARCHS["rcan_s2"]["rcan"] and "conv" not in cfg and cfg["splits"]["train"]
-    for name in ("rcan_s2", "rcan_s2_light", "rcan_s1"):
+    for name in ("rcan_s2", "rcan_s2_light", "rcan_s1", "rcan_s2_v2"):
         spec = REA_ARCHS[name]
         cells = [v["cell_deg"] for v in spec["rcan"]["levels"]]
         assert cells[-1] == 0.16 and spec["graph"] == f"multiscale_s{round(0.16 / cells[0])}"
         assert level_strides(tuple(Level(v["cell_deg"], v["enc"], v["dec"]) for v in spec["rcan"]["levels"]), cells[0])
+    v2 = REA_ARCHS["rcan_s2_v2"]["rcan"]["levels"]
+    assert [(v["enc"], v["dec"], v["channel_attention"]) for v in v2] == [([1, 3], [3, 4], False), ([1, 3], [1, 3], True)]
 
