@@ -25,6 +25,17 @@ converted in place and meta.zarr's attrs record the scale, the clip and the clip
 finished conversion. The datastore converts back per sample. A float32 pack in the folder converts on a rerun with
 --dtype int16.
 
+Each level variable's state std is floored (STATE_STD_MIN, STATE_STD_MEDIAN_FRACTION): one Gulf-wide std per channel
+is tiny at depth, so ordinary bottom-layer variability standardized with it became 35 sigma inputs, and a free run of
+rcan_s2 fed one back until it blew up (emu-rea-rcan incident 2; docs/redesign-2026-11-04-rcan-first-principles.md
+2.1). meta.zarr keeps the unfloored std as state_std_raw and lists the floored channels and the floor per variable in
+its attrs. The change std keeps its floor at DIFF_STD_FLOOR x the raw state std, so state_diff_std is unchanged and so
+is every channel's loss weight in physical units (neural-lam's wmse weights a standardized error by
+state_std / state_diff_std, which is 1 / state_diff_std on the physical error). `refloor` writes the floored statistics
+for a pack built before the floor into a new folder that links the old arrays; for an int16 pack the std the values
+were quantized with stays in meta.zarr as state_int16_std and the datastore decodes with it. `zscan` reports the
+largest standardized |state| per channel over a sample of the train rows, before and after the floor.
+
 Run `python -m hycom_emulator.rea_pack build <out_dir> --start YYYY-MM-DD --end YYYY-MM-DD --train-end YYYY-MM-DD`.
 `python -m hycom_emulator.rea_pack inventory` lists which days the archive holds.
 """
@@ -54,6 +65,9 @@ FORMAT = 1
 INT16_SCALE = 2000  # counts per standard deviation
 INT16_CLIP = 16  # standard deviations
 FILL = 1e29
+# State std floor per level variable: max(physical minimum, STATE_STD_MEDIAN_FRACTION x the median std over the column).
+STATE_STD_MIN = {"temp": 0.05, "salin": 0.02, "u": 0.01, "v": 0.01}  # degC, psu, m/s
+STATE_STD_MEDIAN_FRACTION = 0.1
 # A level that sits on the sea floor can be fill on some days and valid on others (6 points at 800 m on the
 # Blake Plateau in 2001); such points take the value of the level above. More than this fraction is a bad file.
 MAX_LOST_FRACTION = 1e-3
@@ -522,14 +536,36 @@ def _statistics(layout: Layout, arrays, use: np.ndarray, ocean: np.ndarray, leve
         for (ch, _), m in zip(groups, moments):
             mean[k][ch] = m.mean
             raw[k][ch] = np.sqrt(m.m2 / m.n)
+    state_std, floor_attrs = floored_state_std(layout, raw["state"])
     return {
         "state_mean": mean["state"],
-        "state_std": _safe(raw["state"]),
+        "state_std": state_std,
+        "state_std_raw": _safe(raw["state"]),
         "state_diff_mean": mean["diff"],
         "state_diff_std": _safe(np.maximum(raw["diff"], DIFF_STD_FLOOR * raw["state"])),
         "forcing_mean": forcing.mean,
         "forcing_std": forcing.std,
-    }
+    }, floor_attrs
+
+
+def state_std_floor(layout: Layout, raw: np.ndarray) -> dict[str, float]:
+    """The floor of each level variable's state std, from the raw std of its column's channels."""
+    n = layout.nlev
+    return {v: float(max(STATE_STD_MIN[v], STATE_STD_MEDIAN_FRACTION * np.median(raw[i * n : (i + 1) * n])))
+            for i, v in enumerate(LEVEL_VARS)}
+
+
+def floored_state_std(layout: Layout, raw: np.ndarray) -> tuple[np.ndarray, dict]:
+    """(state std with each level channel at least its variable's floor, the meta.zarr attrs that record it)."""
+    floor = state_std_floor(layout, raw)
+    per_channel = np.zeros(len(layout.state_names))
+    for i, v in enumerate(LEVEL_VARS):
+        per_channel[i * layout.nlev : (i + 1) * layout.nlev] = floor[v]
+    std = _safe(np.maximum(raw, per_channel))
+    floored = [name for name, r, f in zip(layout.state_names, raw, per_channel) if r < f]
+    attrs = {"state_std_floor": floor, "state_std_floored": floored,
+             "state_std_floor_rule": f"max({STATE_STD_MIN}, {STATE_STD_MEDIAN_FRACTION} x median column std)"}
+    return std, attrs
 
 
 def _write_meta(plan: Plan, out: Path, days: np.ndarray, present: np.ndarray, grid: Grid) -> None:
@@ -538,7 +574,7 @@ def _write_meta(plan: Plan, out: Path, days: np.ndarray, present: np.ndarray, gr
     level_ocean = _to_grid_index(grid.level_ocean)
     static = _to_grid_index(grid.static)
     use = present & (days <= np.datetime64(plan.train_end))
-    stats = _statistics(layout, _open_rows(out, "r"), use, ocean, level_ocean)
+    stats, floor_attrs = _statistics(layout, _open_rows(out, "r"), use, ocean, level_ocean)
     g = "grid_index"
     gx, gy = np.meshgrid(grid.lon, grid.lat, indexing="ij")
     feature = {"state": "state_feature", "forcing": "forcing_feature"}
@@ -565,7 +601,7 @@ def _write_meta(plan: Plan, out: Path, days: np.ndarray, present: np.ndarray, gr
             "static_feature_units": (("static_feature",), list(STATIC_UNITS.values())),
         },
         attrs={"train_end": plan.train_end.isoformat(), "stride": plan.stride, "depths": list(layout.depths),
-               "root": plan.root, "band": plan.band, "source": "GOMb0.04 reanalysis daily means"},
+               "root": plan.root, "band": plan.band, "source": "GOMb0.04 reanalysis daily means", **floor_attrs},
     )
     for v in ds.variables.values():
         v.encoding.clear()
@@ -573,6 +609,81 @@ def _write_meta(plan: Plan, out: Path, days: np.ndarray, present: np.ndarray, gr
     shutil.rmtree(tmp, ignore_errors=True)
     ds.to_zarr(tmp, mode="w", consolidated=True)
     tmp.rename(out / "meta.zarr")
+
+
+LINKED = ("state.npy", "forcing.npy", "plan.json", "written.npy", "grid.npz")
+
+
+def refloor(src: Path, out: Path) -> list[str]:
+    """A new pack folder `out` that links src's arrays and holds src's meta.zarr with the state std floored, for a pack
+    built before the floor (src is not changed: other runs read its statistics). For an int16 pack the std its values
+    were quantized with is kept as state_int16_std, which the datastore decodes with. Returns the floored channels."""
+    src, out = Path(src).resolve(), Path(out)
+    meta = xr.open_zarr(src / "meta.zarr", consolidated=True).load()
+    if "state_std_floored" in meta.attrs:
+        raise ValueError(f"{src} already has a floored state std")
+    if out.exists():
+        raise ValueError(f"{out} exists")
+    layout = Layout(tuple(float(d) for d in meta.attrs["depths"]))
+    raw = meta.state_std.values.astype(np.float64)
+    std, attrs = floored_state_std(layout, raw)
+    ds = meta.copy()
+    if "int16_scale" in meta.attrs:
+        ds["state_int16_std"] = meta.state_std
+    ds["state_std_raw"] = meta.state_std
+    ds["state_std"] = (("state_feature",), std.astype(np.float32))
+    ds.attrs.update(attrs | {"refloored_from": str(src)})
+    for v in ds.variables.values():
+        v.encoding.clear()
+    tmp = out.with_name(out.name + ".partial")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True)
+    for name in LINKED:
+        if (src / name).exists():
+            (tmp / name).symlink_to(src / name)
+    ds.to_zarr(tmp / "meta.zarr", mode="w", consolidated=True)
+    tmp.rename(out)
+    return attrs["state_std_floored"]
+
+
+def zscan(pack: Path, every: int = 10) -> dict:
+    """Largest standardized |state| per channel over every `every`-th row up to train_end, on the real points of each
+    level and on the Gulf ones, with the raw std and with the floored one. {"rows", "channels": {name: {raw_std, std,
+    max_raw_sigma, max_sigma, gulf_max_sigma, at: [lon, lat, day], gulf_at}}}."""
+    from hycom_emulator.datastore import _open
+
+    pack = Path(pack)
+    meta = xr.open_zarr(pack / "meta.zarr", consolidated=True).load()
+    layout = Layout(tuple(float(d) for d in meta.attrs["depths"]))
+    raw = (meta["state_std_raw"] if "state_std_raw" in meta else meta.state_std).values.astype(np.float64)
+    std, _ = floored_state_std(layout, raw)
+    state = _open(pack).state
+    t = meta.time.values.astype("datetime64[D]")
+    rows = np.flatnonzero(t <= np.datetime64(meta.attrs["train_end"]))[::every]
+    mean = meta.state_mean.values.astype(np.float64)
+    level_ocean = meta.level_ocean.values.astype(bool)
+    real = np.ones((level_ocean.shape[0], len(layout.state_names)), bool)
+    for i in range(len(LEVEL_VARS)):
+        real[:, i * layout.nlev : (i + 1) * layout.nlev] = level_ocean
+    gulf = meta.static.sel(static_feature="gulf").values > 0.5
+    masks = {"": real, "gulf_": real & gulf[:, None]}
+    worst = {k: np.zeros(real.shape[1]) for k in masks}
+    where = {k: np.zeros((real.shape[1], 2), int) for k in masks}
+    for n in rows:
+        anomaly = np.abs(np.asarray(state[n].values, np.float64) - mean)
+        for k, mask in masks.items():
+            a = np.where(mask, anomaly, 0.0)
+            i = a.argmax(0)
+            v = a[i, np.arange(a.shape[1])]
+            better = v > worst[k]
+            worst[k][better], where[k][better] = v[better], np.stack([i, np.full_like(i, n)], 1)[better]
+    x, y = meta.x.values, meta.y.values
+    at = lambda k, c: [float(x[where[k][c, 0]]), float(y[where[k][c, 0]]), str(t[where[k][c, 1]])]  # noqa: E731
+    return {"rows": int(rows.size), "channels": {
+        name: {"raw_std": float(raw[c]), "std": float(std[c]), "max_raw_sigma": float(worst[""][c] / raw[c]),
+               "max_sigma": float(worst[""][c] / std[c]), "gulf_max_sigma": float(worst["gulf_"][c] / std[c]),
+               "at": at("", c), "gulf_at": at("gulf_", c)}
+        for c, name in enumerate(layout.state_names)}}
 
 
 def inventory(root: str | Path, start: date | None = None, end: date | None = None) -> None:
@@ -616,7 +727,26 @@ def main() -> None:
     b.add_argument("--workers", type=int, default=32, help="parallel readers; keep under 64 on the shared server")
     b.add_argument("--dtype", choices=("float32", "int16"), default="float32",
                    help="int16: standardised fixed point (half the size), converted after the float32 build")
+    r = sub.add_parser("refloor", help="a new folder linking a pre-floor pack's arrays, with the floored state std")
+    r.add_argument("src", type=Path)
+    r.add_argument("out", type=Path)
+    z = sub.add_parser("zscan", help="largest standardized |state| per channel over train rows, raw and floored std")
+    z.add_argument("pack", type=Path)
+    z.add_argument("--every", type=int, default=10)
+    z.add_argument("--json", type=Path)
     a = p.parse_args()
+    if a.cmd == "refloor":
+        print("floored:", " ".join(refloor(a.src, a.out)))
+        return
+    if a.cmd == "zscan":
+        res = zscan(a.pack, a.every)
+        if a.json:
+            a.json.write_text(json.dumps(res, indent=1))
+        print(f"{res['rows']} train rows")
+        for name, c in res["channels"].items():
+            print(f"{name:12s} std {c['raw_std']:.4g} -> {c['std']:.4g}  max {c['max_raw_sigma']:6.1f} -> {c['max_sigma']:6.1f} "
+                  f"sigma at {c['at']}  Gulf {c['gulf_max_sigma']:6.1f} at {c['gulf_at']}")
+        return
     if a.cmd == "inventory":
         inventory(a.root, a.start, a.end)
         return
