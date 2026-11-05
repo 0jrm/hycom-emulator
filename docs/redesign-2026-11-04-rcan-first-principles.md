@@ -221,9 +221,9 @@ it starts from scratch; other arches unchanged.
 | rcan_s2_v2 | 0.342 (3.0x) | 11.1 GiB | 1.83 / 1.95 / 2.25 / 2.42 | 8.23 (2.7x) | 19.4 GiB | 5 + 40 GB |
 
 The RMS does not stay flat under rcan from scratch at 1e-3: it grows 1.3x in 50 steps, where the first build's grew
-4x in 30 (1.8 to 7.5); graph_lam's falls slightly. The exit's own output is bounded by construction, so the part that
-grows is the encoder stream `fine + encoding_grid_mlp(fine)`, which enters the output unnormalized as in GraphLAM; the
-free run below shows it flat over 60 days. Loaded from revert-fp16 the 16-day RMS is flat (0.80 to 0.77).
+4x in 30 (1.8 to 7.5); graph_lam's falls slightly. This probe did not split the sum into its terms (the encoder
+stream `fine + encoding_grid_mlp(fine)`, which enters unnormalized as in GraphLAM, the replicated mesh message, and the
+exit, which is bounded by its weights but not fixed); over 60 free-run days below the sum stays flat. Loaded from revert-fp16 the 16-day RMS is flat (0.80 to 0.77).
 
 **Smoke** (train_rea.sh ARCH=rcan_s2_v2, 2021-01-01..03-01, stages 1-2-4 one epoch each, validation losses):
 
