@@ -69,9 +69,11 @@ REA_ARCHS = {
 
 
 def _rcan(*levels):
-    """An rcan section (hycom_emulator.rcan) with F = 128 for (cell_deg, enc groups, enc blocks, dec groups, dec blocks)."""
+    """An rcan section (hycom_emulator.rcan) with F = 128 for (cell_deg, enc groups, enc blocks, dec groups, dec blocks
+    [, channel attention at that level])."""
     return {"width": 128, "channel_attention": True, "reduction": 16, "norm": True, "checkpoint_blocks": True, "tile": None,
-            "levels": [{"cell_deg": c, "enc": [eg, eb], "dec": [dg, db]} for c, eg, eb, dg, db in levels]}
+            "levels": [{"cell_deg": c, "enc": [eg, eb], "dec": [dg, db]} | ({"channel_attention": ca[0]} if ca else {})
+                       for c, eg, eb, dg, db, *ca in levels]}
 
 
 # RCAN pyramids around the same mesh, coupled at 0.16 deg cells (docs/plan-2026-11-04-rcan-graph-emulator.md 3.2):
@@ -81,6 +83,10 @@ REA_ARCHS |= {
     "rcan_s2_light": {"model": "rcan_graph_lam", "graph": "multiscale_s2", "rcan": _rcan((0.08, 1, 3, 1, 3), (0.16, 1, 3, 1, 3))},
     "rcan_s1": {"model": "rcan_graph_lam", "graph": "multiscale_s4",
                 "rcan": _rcan((0.04, 1, 3, 1, 3), (0.08, 2, 3, 2, 3), (0.16, 1, 3, 1, 3))},
+    # docs/redesign-2026-11-04-rcan-first-principles.md 2.2-2.3: depth in the fine decoder (the super-resolution
+    # network), channel attention off at the fine level so it is a local operator, on at the coupled level.
+    "rcan_s2_v2": {"model": "rcan_graph_lam", "graph": "multiscale_s2",
+                   "rcan": _rcan((0.08, 1, 3, 3, 4, False), (0.16, 1, 3, 1, 3, True))},
 }
 
 
