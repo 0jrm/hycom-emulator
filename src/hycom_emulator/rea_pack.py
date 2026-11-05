@@ -52,7 +52,6 @@ from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import Path
 
-import netCDF4
 import numpy as np
 import xarray as xr
 from scipy import ndimage
@@ -226,6 +225,8 @@ def _valid(a: np.ndarray) -> np.ndarray:
 def read_day(root: str | Path, day: np.datetime64, level_index, stride: int):
     """Raw (levels (var, level, y, x), surface (var, y, x), wind (var, y, x)) for one day, subsampled.
     Values are as stored: fill and NaN included."""
+    import netCDF4  # only the archive readers need it (the skynet venv has none; refloor and zscan run there)
+
     p3, p2 = day_paths(root, day)
     s = slice(None, None, stride)
     top = int(max(level_index)) + 1
@@ -288,6 +289,8 @@ def boundary_mask(ocean: np.ndarray, band: int) -> np.ndarray:
 
 def make_grid(plan: Plan) -> Grid:
     """Static fields and masks from the start day and topography, computed on the native grid."""
+    import netCDF4
+
     p3, _ = day_paths(plan.root, np.datetime64(plan.start))
     with netCDF4.Dataset(p3) as nc:
         nc.set_auto_maskandscale(False)
