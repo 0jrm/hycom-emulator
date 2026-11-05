@@ -4,7 +4,8 @@ GraphLAM's grid path is pointwise, so change below the mesh scale (~28 km) is a 
 fronts come out smooth (docs/plan-2026-11-04-rcan-graph-emulator.md). RcanGraphLAM keeps every GraphLAM module and
 puts index-space conv levels between the grid and the mesh:
 
-    h0 = grid_embedder(x) + head(x)                   head: conv3x3 over the 2 states, forcing windows and statics
+    h0 = grid_embedder(x) + head(x)                   head: conv3x3 over the 2 states, forcing windows and statics,
+                                                      LayerNorm, zero-initialised 1x1 conv
     e0 = enc0(h0); ek = enck(down_k(e(k-1)))          down: space-to-depth by s_k, 1x1 conv, starts as the cell mean
     cn = nodes(eK); rep = cn + encoding_grid_mlp(cn)  K: the mesh-coupled level (its cells are the graph's grid nodes)
     msg = m2g_gnn(process(g2m_gnn(cn)), rep) - rep    GraphLAM, unchanged
@@ -15,10 +16,14 @@ puts index-space conv levels between the grid and the mesh:
 Each enc/dec is RCAN's residual-in-residual module: groups of convnet.ResBlock (pre-norm, conv-SiLU-conv, squeeze-excite)
 with a group conv on each group's skip and a zero-initialised conv on the long skip. With `norm`, every conv whose
 output joins the residual stream reads it through a per-point LayerNorm: the group and long-skip convs and the level
-skips too, not only the blocks. Without it, the long-skip conv's first Adam steps move all 1152 taps by about lr with
+skips too, not only the blocks, and the head reads the raw input through a conv and writes into the stream through a
+LayerNorm and a 1x1 conv, so what it adds is bounded by its weights whatever the input, as GraphLAM's grid embedder
+(an MLP ending in a LayerNorm) is. With a bare conv head, a 1250 m bottom cell whose truth sits at 35 sigma entered
+the stream linearly, its error fed back through every free-run day, and rcan_s2 blew up 3-5x a day from day 7
+(emu-rea-rcan, 2026-11-04). Without the norms, the long-skip conv's first Adam steps move all 1152 taps by about lr with
 one sign, its output grows with the stream it reads, and rcan_s2 diverged from scratch at lr 1e-3 (probe 2026-11-04:
 1-day train loss 1.5 to 5.4 in three steps while graph_lam fell to 0.8; with the long-skip convs held at zero it
-tracked graph_lam). With head, the long-skip convs and
+tracked graph_lam). With the head's 1x1 conv, the long-skip convs and
 the level skips at zero, every level starts as the identity and a GraphLAM checkpoint loads into the model as
 GraphLAM's step with the mesh reading cell means and its message written back by nearest replication. With one level
 (coupled at the grid) that is GraphLAM's step exactly. The decoders carry the mesh message, and the fine
@@ -50,7 +55,7 @@ from torch.utils.checkpoint import checkpoint
 
 from hycom_emulator.convnet import ResBlock, _image, _nodes
 
-RCAN_MODULES = ("head.", "levels.")
+RCAN_MODULES = ("head.", "head_norm.", "head_out.", "levels.")
 STRIDE_TOLERANCE = 0.02  # relative: a level's cell may differ from a whole multiple of the previous one by this much
 
 
@@ -245,8 +250,10 @@ class RcanGraphLAM(GraphLAM):
             mask = F.max_pool2d(_pad(mask, s), s) if k else mask
             self.register_buffer(f"mask{k}", mask, persistent=False)
         self.head = nn.Conv2d(self.grid_input_dim, width, 3, padding=1)
-        nn.init.zeros_(self.head.weight)
-        nn.init.zeros_(self.head.bias)
+        self.head_norm = nn.LayerNorm(width) if cfg.norm else None
+        self.head_out = nn.Conv2d(width, width, 1)
+        nn.init.zeros_(self.head_out.weight)
+        nn.init.zeros_(self.head_out.bias)
         last = len(cfg.levels) - 1
         self.levels = nn.ModuleDict({
             level_key(v.cell_deg): RcanLevel(width, v, self.strides[k] if k else None,
@@ -266,7 +273,7 @@ class RcanGraphLAM(GraphLAM):
         x = torch.cat((prev_state, prev_prev_state, forcing, self.expand_to_batch(self.grid_static_features, batch_size)), -1)
         nx, ny = self.sizes[0]
         levels = list(self.levels.values())
-        h = _image(self.grid_embedder(x), nx, ny) + self.head(_image(x, nx, ny))
+        h = _image(self.grid_embedder(x), nx, ny) + self.head_out(_norm(self.head_norm, self.head(_image(x, nx, ny))))
         enc = []
         for k, level in enumerate(levels):
             if k:
