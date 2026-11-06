@@ -17,6 +17,9 @@
   sums are not deterministic on GPU either way, and the deterministic kernels cost 5-25% per step).
 - --plateau DECAY STOP: after DECAY validations without a relative gain of --plateau_threshold (default 0.005) in
   val_mean_loss, multiply the learning rate by --lr_decay (default 0.5); after STOP such validations, stop the run.
+- --warmup N: ramp the learning rate linearly over the run's first N optimizer steps, step k at (k + 1) / N of the
+  rate the optimizer was built with (--lr). Multiplicative, so a --plateau decay inside the ramp composes with it, and
+  the step count is saved in the checkpoint, so a resumed run continues the ramp.
 - --log_domain_means: also log, in validation, the Gulf-mean error and squared error of each rea_loss quantity in SI
   units per step of --val_steps_to_log (`val_<quantity>_err_unroll<k>`, `val_<quantity>_sqerr_unroll<k>`).
 
@@ -26,12 +29,14 @@ Each switch is off by default and changes no weights, so checkpoints load with o
         --steps 10 [--num_workers 8] [--seed 0] [--model conv_graph_lam --graph multiscale_s2] [--precision 16-mixed] \\
         [--loss rea_wmse ...] [arm flags]
 
-`probe` builds the model train_model would build for these flags, loads the checkpoint's weights and takes `steps`
-optimizer steps on train batches. --model and --graph replace the checkpoint's (a graph_lam checkpoint loads into
+`probe` builds the model train_model would build for these flags, loads the checkpoint's weights (or, with
+--from_scratch, only its hyperparameters) and takes `steps` optimizer steps on train batches at the checkpoint's
+learning rate or --lr. --model and --graph replace the checkpoint's (a graph_lam checkpoint loads into
 conv_graph_lam with its conv blocks at identity); --precision 16-mixed runs as Lightning's: fp16 autocast and a gradient
 scaler. It prints one JSON line: peak GPU memory (GiB; null on CPU), the median time per step and per data wait over
-the steps after the first, the losses, and RssAnon/RssFile/RssShmem (GiB) of the probe and of each child process (the
-loader workers) after the last step. It exits 1 on a non-finite loss.
+the steps after the first, the losses, the RMS of the output map's input per step (mean over the step's rollout
+calls; a forward hook, so a compiled predictor has one graph break there), and RssAnon/RssFile/RssShmem (GiB) of the
+probe and of each child process (the loader workers) after the last step. It exits 1 on a non-finite loss.
 """
 
 from __future__ import annotations
@@ -72,6 +77,7 @@ class Options:
     plateau_threshold: float = 0.005
     lr_decay: float = 0.5
     stability: float = 0.0
+    warmup: int = 0
 
 
 def _value(argv: list[str], flag: str, default: str | None = None) -> str | None:
@@ -97,6 +103,7 @@ def split_args(argv: list[str]) -> tuple[Options, list[str]]:
     p.add_argument("--plateau", type=int, nargs=2, metavar=("DECAY", "STOP"))
     p.add_argument("--plateau_threshold", type=float, default=0.005)
     p.add_argument("--lr_decay", type=float, default=0.5)
+    p.add_argument("--warmup", type=int, default=0)
     a, rest = p.parse_known_args(argv)
     opts = Options(**{**vars(a), "plateau": tuple(a.plateau) if a.plateau else None})
     rea = _value(rest, "--loss", "wmse") == "rea_wmse"
@@ -108,8 +115,8 @@ def split_args(argv: list[str]) -> tuple[Options, list[str]]:
         p.error("--mean_penalty > 0 needs --mean_scales")
     if opts.log_domain_means and (_value(rest, "--model", "graph_lam") == "crps_graph_lam" or _value(rest, "--loss") == "wcrps_gauss"):
         p.error("--log_domain_means replaces ForecasterModule, which the crps and Gaussian-head arms also replace")
-    if min(opts.mean_penalty or 0.0, opts.amse, opts.stability, opts.pushforward, opts.input_noise) < 0:
-        p.error("weights, --pushforward and --input_noise are >= 0")
+    if min(opts.mean_penalty or 0.0, opts.amse, opts.stability, opts.pushforward, opts.input_noise, opts.warmup) < 0:
+        p.error("weights, --pushforward, --input_noise and --warmup are >= 0")
     if opts.train_first_step and not opts.pushforward:
         p.error("--train_first_step needs --pushforward")
     if opts.plateau and not (0 < opts.plateau[0] <= opts.plateau[1] and 0 < opts.lr_decay < 1 and 0 <= opts.plateau_threshold < 1):
@@ -150,11 +157,12 @@ def install(opts: Options, rest: list[str]) -> None:
 
         tm.build_predictor = compiled
         on.append("torch.compile step predictor")
-    if opts.nondeterministic or opts.plateau:
+    if opts.nondeterministic or opts.plateau or opts.warmup:
         tm.pl = _Lightning(tm.pl, opts)
         on.append(f"Trainer deterministic {not opts.nondeterministic}"
                   + (f"; plateau decay after {opts.plateau[0]} x{opts.lr_decay:g}, stop after {opts.plateau[1]}, "
-                     f"threshold {opts.plateau_threshold:g}" if opts.plateau else ""))
+                     f"threshold {opts.plateau_threshold:g}" if opts.plateau else "")
+                  + (f"; linear lr warm-up over {opts.warmup} steps" if opts.warmup else ""))
     if opts.log_domain_means:
         tm.ForecasterModule = ReaForecasterModule
         on.append("validation logs Gulf-mean errors")
@@ -163,7 +171,7 @@ def install(opts: Options, rest: list[str]) -> None:
 
 class _Lightning:
     """pytorch_lightning as neural-lam's train_model sees it, with Trainer built from opts: deterministic off on
-    request, and the Plateau callback added."""
+    request, and the Warmup and Plateau callbacks added."""
 
     def __init__(self, pl, opts: Options):
         self._pl, self._opts = pl, opts
@@ -174,10 +182,42 @@ class _Lightning:
     def Trainer(self, *args, **kwargs):  # noqa: N802  stands in for pl.Trainer
         if self._opts.nondeterministic:
             kwargs["deterministic"] = False
+        if self._opts.warmup:
+            kwargs["callbacks"] = [*kwargs.get("callbacks", []), Warmup(self._opts.warmup)]
         if self._opts.plateau:
             decay, stop = self._opts.plateau
             kwargs["callbacks"] = [*kwargs.get("callbacks", []), Plateau(decay, stop, self._opts.plateau_threshold, self._opts.lr_decay)]
         return self._pl.Trainer(*args, **kwargs)
+
+
+class Warmup(pl.Callback):
+    """Linear learning-rate warm-up over the first `steps` training batches (one optimizer step each): batch k (from
+    0) runs at (k + 1) / steps of the optimizer's rate. Each batch multiplies the rate by the ramp's ratio to the batch
+    before, so a decay applied meanwhile (Plateau) stays applied. The batch count rides the checkpoint."""
+
+    def __init__(self, steps: int):
+        super().__init__()
+        self.steps, self.done = steps, 0
+
+    def ratio(self, k: int) -> float:
+        """What batch k's rate is multiplied by: (k + 1) / k, and 1 / steps for the first."""
+        return 1.0 / self.steps if k == 0 else (k + 1) / k
+
+    def on_train_batch_start(self, trainer, module, batch, batch_idx):
+        if self.done >= self.steps:
+            return
+        for opt in trainer.optimizers:
+            for group in opt.param_groups:
+                group["lr"] *= self.ratio(self.done)
+        self.done += 1
+        if self.done in (1, self.steps):
+            print(f"warmup: step {self.done} of {self.steps}, lr {trainer.optimizers[0].param_groups[0]['lr']:.3g}", flush=True)
+
+    def state_dict(self):
+        return {"done": self.done}
+
+    def load_state_dict(self, state):
+        self.done = state["done"]
 
 
 class Plateau(pl.Callback):
@@ -356,6 +396,8 @@ def probe(argv: list[str]) -> int:
     p.add_argument("--model", help="step predictor to build instead of the checkpoint's")
     p.add_argument("--graph", help="graph to use instead of the checkpoint's")
     p.add_argument("--precision", default="32", choices=("32", "16-mixed"))
+    p.add_argument("--from_scratch", action="store_true", help="random init (seeded by --seed): only the checkpoint's hyperparameters are used")
+    p.add_argument("--lr", type=float, help="learning rate instead of the checkpoint's")
     a = p.parse_args(rest)
     install(opts, rest)
 
@@ -366,9 +408,16 @@ def probe(argv: list[str]) -> int:
     args = ckpt["hyper_parameters"]["args"]
     args.model, args.graph = a.model or args.model, a.graph or args.graph
     config, ds = load_config_and_datastore(config_path=a.config_path)
-    forecaster = tm.ARForecaster(tm.build_predictor(MODELS[args.model], args, config, ds), ds)
-    module = tm.ForecasterModule(forecaster=forecaster, config=config, datastore=ds, loss=a.loss, lr=args.lr)
-    module.load_state_dict(ckpt["state_dict"])
+    if a.from_scratch and a.seed is not None:
+        torch.manual_seed(a.seed)
+    predictor = tm.build_predictor(MODELS[args.model], args, config, ds)
+    rms = []  # output_map's input RMS, one value per predictor call; a compiled predictor breaks its graph here
+    predictor.output_map.register_forward_hook(torch.compiler.disable(
+        lambda mod, i, o: rms.append(i[0].detach().float().pow(2).mean().sqrt())))
+    forecaster = tm.ARForecaster(predictor, ds)
+    module = tm.ForecasterModule(forecaster=forecaster, config=config, datastore=ds, loss=a.loss, lr=a.lr or args.lr)
+    if not a.from_scratch:
+        module.load_state_dict(ckpt["state_dict"])
     module = module.to(device).train()
     opt = module.configure_optimizers()
     data = WeatherDataset(ds, split="train", ar_steps=a.ar_steps_train, num_past_forcing_steps=args.num_past_forcing_steps,
@@ -385,7 +434,7 @@ def probe(argv: list[str]) -> int:
     scaler = torch.amp.GradScaler(device.type, enabled=amp)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats()
-    batches, losses, waits, steps = iter(loader), [], [], []
+    batches, losses, waits, steps, rms_steps = iter(loader), [], [], [], []
     for _ in range(a.steps):
         t0 = time.perf_counter()
         batch = next(batches, None)
@@ -405,6 +454,8 @@ def probe(argv: list[str]) -> int:
         waits.append(t1 - t0)
         steps.append(time.perf_counter() - t1)
         losses.append(loss.item())
+        rms_steps.append(round(float(torch.stack(rms).mean()), 4) if rms else None)
+        rms.clear()
         if not math.isfinite(losses[-1]):
             break
     gib = lambda f: round(f() / 2**30, 3) if device.type == "cuda" else None  # noqa: E731
@@ -414,6 +465,7 @@ def probe(argv: list[str]) -> int:
         "flags": {k: str(v) if isinstance(v, Path) else v for k, v in asdict(opts).items()},
         "peak_allocated_gib": gib(torch.cuda.max_memory_allocated), "peak_reserved_gib": gib(torch.cuda.max_memory_reserved),
         "s_per_step": later(steps), "data_wait_s": later(waits), "losses": losses, "memory_gib": process_memory(),
+        "lr": a.lr or args.lr, "from_scratch": a.from_scratch, "output_map_input_rms": rms_steps,
     }), flush=True)
     return 0 if all(map(math.isfinite, losses)) else 1
 

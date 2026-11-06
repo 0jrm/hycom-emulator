@@ -13,8 +13,12 @@
 # over the last stage's validation horizon with neural-lam's own per-lead metrics.
 # ARCH=<name of hycom_emulator.convnet.REA_ARCHS> trains that architecture instead of graph_lam (e.g. rcan_s2, or unet_norm: option
 # B's pre-norm U-Net level around the same mesh; a graph_lam START_CKPT loads into it with the conv blocks at identity).
+# LR is the from-scratch peak and every later stage's cap: default 5e-4 for an rcan ARCH (rcan_s2 diverged from scratch at
+# 1e-3; docs/redesign-2026-11-04-rcan-first-principles.md 2.4), 1e-3 otherwise. WARMUP=<steps> ramps the first stage's
+# rate linearly from LR / WARMUP to LR over its first WARMUP optimizer steps (rea_train --warmup); default 500 for an
+# rcan ARCH trained from scratch (no START_CKPT), 0 otherwise. Later stages never warm up.
 # EXCLUDE_SOURCE_CHANGES=1 drops train windows that straddle a change of reanalysis experiment.
-# Overrides: ARCH, GPU, BS, HIDDEN, LAYERS, LR, WORKERS, PRECISION, STAGES, EPOCHS_/CAP_/EVAL_/PF_/CKPT_<days>, FIRST,
+# Overrides: ARCH, GPU, BS, HIDDEN, LAYERS, LR, WARMUP, WORKERS, PRECISION, STAGES, EPOCHS_/CAP_/EVAL_/PF_/CKPT_<days>, FIRST,
 # TRAIN, VAL, TEST (each "start end"), PY; EXTRA_ARGS (space-separated) is appended to every train_model call, e.g. a
 # model or loss of an experiment arm, --compile --nondeterministic --plateau 2 3.
 # Run detached: setsid nohup train_rea.sh <run_id> <out_dir> < /dev/null > <out_dir>/train.log 2>&1 &
@@ -33,6 +37,10 @@ MODEL=(--model graph_lam --graph multiscale --hidden_dim ${HIDDEN:-128} --proces
        --batch_size ${BS:-8} --precision ${PRECISION:-32} --val_interval 1
        --n_example_pred 0 --num_workers ${WORKERS:-8} --logger mlflow --runs_root "$OUT/runs")
 read -r -a EXTRA <<<"${EXTRA_ARGS:-}"
+RCAN=0; case "${ARCH:-}" in rcan*) RCAN=1 ;; esac
+LR=${LR:-$([ $RCAN = 1 ] && echo 5e-4 || echo 1e-3)}
+WARMUP=${WARMUP:-$([ $RCAN = 1 ] && [ -z "${START_CKPT:-}" ] && echo 500 || echo 0)}
+echo "lr $LR (peak and cap), warm-up $WARMUP steps in the first stage"
 
 mkdir -p "$OUT" "$SHM"
 trap 'rm -rf "$SHM"' EXIT
@@ -68,8 +76,8 @@ declare -A EPOCHS_DEF=([1]=30 [2]=15 [4]=10 [8]=8 [16]=6) CAP_DEF=([1]=4h [2]=3h
 
 echo "== $(date -Is) graph"
 timeout 30m $PY -m hycom_emulator.nlam build_graph nlam.yaml $GRAPH  # a <graph>_s<k> builds <graph> first
-next_lr() { $PY -c "import sys; lr, floor, end = map(float, sys.argv[1:]); print(min(lr, max(floor, 2 * end)))" "${LR:-1e-3}" "${LR_FLOOR:-1e-4}" "$1"; }
-PREV=${START_CKPT:-}; E=0; STAGE_LR=${LR:-1e-3}
+next_lr() { $PY -c "import sys; lr, floor, end = map(float, sys.argv[1:]); print(min(lr, max(floor, 2 * end)))" "$LR" "${LR_FLOOR:-1e-4}" "$1"; }
+PREV=${START_CKPT:-}; E=0; STAGE_LR=$LR; FIRST_STAGE=1
 if [ -n "${START_RUN:-}" ]; then END_LR=$(last_lr "$START_RUN"); [ -z "$END_LR" ] || STAGE_LR=$(next_lr "$END_LR"); fi
 for AR in ${STAGES:-1 2 4 8 16}; do
   EP=EPOCHS_$AR; CP=CAP_$AR; EV=EVAL_$AR; PFV=PF_$AR; CKV=CKPT_$AR
@@ -77,6 +85,7 @@ for AR in ${STAGES:-1 2 4 8 16}; do
   STAGE_ARGS=(--ar_steps_train $AR --ar_steps_eval $EVAL --val_steps_to_log $(seq -s " " 1 $EVAL))
   [ "$PF" = 0 ] || STAGE_ARGS+=(--pushforward $PF); [ "$PF" = 0 ] || [ "${FIRST:-0}" = 0 ] || STAGE_ARGS+=(--train_first_step)
   [ "$CKPT" = 0 ] || STAGE_ARGS+=(--checkpoint_steps)
+  [ "$FIRST_STAGE" = 0 ] || [ "$WARMUP" = 0 ] || STAGE_ARGS+=(--warmup $WARMUP); FIRST_STAGE=0
   LOAD=(); [ -z "$PREV" ] || { LOAD=(--load "$PREV"); E=$(( $(epoch_of "$PREV") + 1 )); }
   echo "== $(date -Is) stage ${AR}-day: lr $STAGE_LR ${STAGE_ARGS[*]}"
   timeout --signal=INT ${!CP:-${CAP_DEF[$AR]:-6h}} $PY -m hycom_emulator.nlam train_model --config_path nlam.yaml "${MODEL[@]}" --lr $STAGE_LR "${LOAD[@]}" \

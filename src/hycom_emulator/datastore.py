@@ -157,7 +157,8 @@ def _open(path: Path) -> xr.Dataset:
         if arr.dtype == np.int16:
             if scale is None:
                 raise ValueError(f"{path}/{name}.npy is int16 but meta.zarr has no int16_scale (an unfinished conversion?)")
-            arr = indexing.LazilyIndexedArray(_FixedPoint(arr, ds[f"{name}_mean"].values, ds[f"{name}_std"].values, scale))
+            std = ds.get(f"{name}_int16_std", ds[f"{name}_std"])  # rea_pack refloor keeps the std the values were quantized with
+            arr = indexing.LazilyIndexedArray(_FixedPoint(arr, ds[f"{name}_mean"].values, std.values, scale))
         ds[name] = xr.Variable(dims, arr)
     return ds
 

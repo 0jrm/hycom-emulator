@@ -259,7 +259,10 @@ def test_statistics_match_numpy(pack):
         x = state[use][:, mask, c].astype(np.float64)
         d = np.concatenate([state[b][mask, c] - state[a][mask, c] for a, b in pairs]).astype(np.float64)
         assert float(meta.state_mean[c]) == pytest.approx(x.mean(), rel=1e-5, abs=1e-6), name
-        assert float(meta.state_std[c]) == pytest.approx(x.std(), rel=1e-5), name
+        assert float(meta.state_std_raw[c]) == pytest.approx(x.std(), rel=1e-5), name
+        floor = meta.attrs["state_std_floor"][var] if var else 0.0
+        assert float(meta.state_std[c]) == pytest.approx(max(x.std(), floor), rel=1e-5), name
+        assert (name in meta.attrs["state_std_floored"]) == (x.std() < floor), name
         assert float(meta.state_diff_mean[c]) == pytest.approx(d.mean(), rel=1e-4, abs=1e-6), name
         assert float(meta.state_diff_std[c]) == pytest.approx(max(d.std(), DIFF_STD_FLOOR * x.std()), rel=1e-5), name
     f = forcing[use][:, ocean].astype(np.float64)
@@ -425,3 +428,74 @@ def test_int16_clips_beyond_16_std_and_counts(pack, tmp_path):
     assert qs[1, 5, 3] == 16 * rea_pack.INT16_SCALE and qs[2, 6, 3] == -16 * rea_pack.INT16_SCALE
     assert _meta(q).attrs["int16_clipped_state"] == 2
     assert rea_pack.quantize(q) == {"state": 2, "forcing": 0}  # rerun keeps the int16 arrays and recounts
+
+
+def test_state_std_floor_is_the_larger_of_the_physical_minimum_and_a_tenth_of_the_column_median():
+    layout = rea_pack.Layout((0.0, 100.0, 1000.0))
+    raw = np.array([3.0, 2.0, 0.1,  # temp: median 2 -> 0.2
+                    0.5, 0.3, 0.01,  # salin: median 0.3 -> 0.03
+                    0.05, 0.04, 0.03,  # u: median 0.04 -> 0.004, the 0.01 m/s minimum
+                    0.3, 0.2, 0.2,  # v: nothing below 0.02
+                    0.2, 0.1, 0.1])  # ssh, ubaro, vbaro: no floor
+    std, attrs = rea_pack.floored_state_std(layout, raw)
+    assert attrs["state_std_floor"] == pytest.approx({"temp": 0.2, "salin": 0.03, "u": 0.01, "v": 0.02})
+    np.testing.assert_allclose(std, np.maximum(raw, [0.2] * 3 + [0.03] * 3 + [0.01] * 3 + [0.02] * 3 + [0] * 3), rtol=1e-6)
+    assert attrs["state_std_floored"] == ["temp_1000m", "salin_1000m"]
+
+
+def _prefloor(out, dst):
+    """A copy of the pack as rea_pack wrote it before the floor: state_std unfloored, no floor attrs."""
+    shutil.copytree(out, dst)
+    meta = _meta(dst)
+    ds = meta.drop_vars("state_std_raw").assign(state_std=meta.state_std_raw)
+    ds.attrs = {k: v for k, v in meta.attrs.items() if not k.startswith("state_std_")}
+    for v in ds.variables.values():
+        v.encoding.clear()
+    shutil.rmtree(dst / "meta.zarr")
+    ds.to_zarr(dst / "meta.zarr", mode="w", consolidated=True)
+    return dst
+
+
+@pytest.mark.parametrize("dtype", ["float32", "int16"])
+def test_refloor_links_the_arrays_and_floors_only_the_stats(pack, tmp_path, monkeypatch, dtype):
+    """A pre-floor pack refloored into a new folder: the same physical values (an int16 one decodes with the std it was
+    quantized with), the floored state std, the source untouched."""
+    pytest.importorskip("neural_lam")
+    out, _ = pack
+    old = _prefloor(out, tmp_path / "old")
+    if dtype == "int16":
+        rea_pack.quantize(old)
+    before = _meta(old)
+    monkeypatch.setattr(rea_pack, "STATE_STD_MEDIAN_FRACTION", 1.0)  # floor at the column median: half the channels
+    floored = rea_pack.refloor(old, tmp_path / "new")
+    new = _meta(tmp_path / "new")
+    assert floored and set(floored) == set(new.attrs["state_std_floored"])
+    assert (tmp_path / "new" / "state.npy").is_symlink() and (tmp_path / "new" / "state.npy").resolve() == (old / "state.npy").resolve()
+    np.testing.assert_array_equal(new.state_std_raw, before.state_std)
+    assert (new.state_std.values >= before.state_std.values).all() and (new.state_std.values > before.state_std.values).any()
+    np.testing.assert_array_equal(new.state_diff_std, before.state_diff_std)
+    assert ("state_int16_std" in new) == (dtype == "int16")
+    a = _datastore(old).get_dataarray("state", "train").values
+    b = _datastore(tmp_path / "new").get_dataarray("state", "train").values
+    np.testing.assert_array_equal(b, a)
+    np.testing.assert_array_equal(_meta(old).state_std, before.state_std)
+    with pytest.raises(ValueError, match="exists"):
+        rea_pack.refloor(old, tmp_path / "new")
+    with pytest.raises(ValueError, match="already"):
+        rea_pack.refloor(tmp_path / "new", tmp_path / "again")
+
+
+def test_zscan_reports_the_largest_standardized_state(pack):
+    pytest.importorskip("neural_lam")
+    out, _ = pack
+    res = rea_pack.zscan(out, every=1)
+    meta = _meta(out)
+    state = np.load(out / "state.npy").astype(np.float64)
+    c = meta.state_feature.values.tolist().index("temp_10m")
+    rows = [n for n, t in enumerate(meta.time.values.astype("datetime64[D]")) if t <= np.datetime64(TRAIN_END)]
+    real = meta.level_ocean.values[:, DEPTHS.index(10.0)].astype(bool)
+    expected = np.abs(state[rows][:, real, c] - float(meta.state_mean[c])).max()
+    got = res["channels"]["temp_10m"]
+    assert res["rows"] == len(rows)
+    assert got["max_raw_sigma"] * got["raw_std"] == pytest.approx(expected, rel=1e-5)
+    assert got["max_sigma"] <= got["max_raw_sigma"] and got["gulf_max_sigma"] <= got["max_sigma"] + 1e-9
