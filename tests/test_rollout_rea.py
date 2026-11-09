@@ -311,3 +311,35 @@ def test_operator_images_follow_the_plane_orientation():
     x = torch.randn(2, G, F)
     c = NAMES.index("ssh")
     assert torch.equal(_images(x, geo, ["ssh"])[1, 0], x[1, :, c].double().reshape(5, 4).T)
+
+
+def test_fields_keep_raw_model_truth_and_start_per_lead(record, tmp_path, monkeypatch):
+    import xarray as xr
+
+    from hycom_emulator import rollout_rea as rr
+
+    module, window, times, state = record
+    geo, *_ = _geo(np.random.default_rng(1))
+    lon, lat = np.linspace(-90, -85, G), np.linspace(22, 26, G)
+    static = xr.DataArray(np.stack([lon, lat, np.full(G, 1000.0)], 1), dims=("grid_index", "static_feature"),
+                          coords={"static_feature": ["lon", "lat", "depth"]})
+    model = rr.Model(module, window, times, geo, xr.Dataset({"static": static}), (5, 4), None)
+    monkeypatch.setattr(rr, "load_model", lambda c, k: model)
+    monkeypatch.setattr(rr, "release_pack_pages", lambda d: None)
+    monkeypatch.setattr(rr, "_md5", lambda p: "md5")
+    starts = ["2022-01-03", "2022-01-20", "2022-01-11"]
+    ds = rr.fields(tmp_path / "c", tmp_path / "k", tmp_path / "f.nc", starts, 20, 4, 2, ("ssh", "u_0m"))
+    assert list(ds.start.values.astype("datetime64[D]").astype(str)) == sorted(starts)
+    assert list(ds.horizon.values) == [20, 18, 9]
+    ref = _collect(module, window, times, start_set(times.astype("datetime64[D]"), 20, starts), 4)
+    by_date = {str(s.date): b for b, s in enumerate(start_set(times.astype("datetime64[D]"), 20, starts))}
+    j = NAMES.index("ssh")
+    for i, d in enumerate(ds.start.values.astype("datetime64[D]").astype(str)):
+        b = by_date[d]
+        for lead in (1, int(ds.horizon[i])):
+            pred, truth, _, x0 = ref[b, lead]
+            assert np.allclose(ds.ssh_model.values[i, lead - 1], pred[:, j].numpy(), atol=1e-6)
+            assert np.allclose(ds.ssh_truth.values[i, lead - 1], truth[:, j].numpy())
+        assert np.allclose(ds.ssh_start.values[i], x0[:, j].numpy())
+        assert np.isnan(ds.ssh_model.values[i, int(ds.horizon[i]):]).all()
+    assert ds.attrs["nx"] == 5 and ds.attrs["ny"] == 4 and (tmp_path / "f.nc").exists()
