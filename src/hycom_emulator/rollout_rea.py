@@ -120,6 +120,16 @@ class Plane:
     strip: np.ndarray  # (ny, nx) bool: the Yucatan strip seed inside gulf500
 
 
+def band_index(shape: tuple[int, int], dx_km: float) -> np.ndarray:
+    """(shape) BANDS index of each 2D FFT bin of an image with square cells of dx_km, by wavelength; -1 for the mean."""
+    k = np.hypot(*np.meshgrid(np.fft.fftfreq(shape[0], dx_km), np.fft.fftfreq(shape[1], dx_km), indexing="ij"))
+    wavelength = np.divide(1.0, k, out=np.full_like(k, np.inf), where=k > 0)
+    band = np.full(k.shape, -1)
+    for i, (lo, hi) in enumerate(BANDS.values()):
+        band[(k > 0) & (wavelength >= lo) & (wavelength < hi)] = i
+    return band
+
+
 def plane(shape: tuple[int, int], lon: np.ndarray, lat: np.ndarray, depth: np.ndarray, gulf: np.ndarray,
           masks: dict[str, np.ndarray], stride: int, device="cpu") -> Plane:
     """lon, lat, depth, gulf and masks (channel -> region where it is scored) are (grid,) arrays."""
@@ -130,12 +140,7 @@ def plane(shape: tuple[int, int], lon: np.ndarray, lat: np.ndarray, depth: np.nd
     ys, xs = np.nonzero(union)
     box = (slice(ys.min(), ys.max() + 1), slice(xs.min(), xs.max() + 1))
     window = np.outer(np.hanning(box[0].stop - box[0].start), np.hanning(box[1].stop - box[1].start))
-    dx = float(side[union].mean())
-    k = np.hypot(*np.meshgrid(np.fft.fftfreq(window.shape[0], dx), np.fft.fftfreq(window.shape[1], dx), indexing="ij"))
-    wavelength = np.divide(1.0, k, out=np.full_like(k, np.inf), where=k > 0)
-    band = np.full(k.shape, -1)
-    for i, (lo, hi) in enumerate(BANDS.values()):
-        band[(k > 0) & (wavelength >= lo) & (wavelength < hi)] = i
+    band = band_index(window.shape, float(side[union].mean()))
     gulf500 = img(gulf) & (img(depth) > LC_MIN_DEPTH)
     strip = (gulf500 & (lat2 >= YUCATAN_STRIP["lat"][0]) & (lat2 <= YUCATAN_STRIP["lat"][1])
              & (lon2 >= YUCATAN_STRIP["lon"][0]) & (lon2 <= YUCATAN_STRIP["lon"][1]))
