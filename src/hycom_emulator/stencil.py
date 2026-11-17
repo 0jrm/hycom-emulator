@@ -56,9 +56,30 @@ def centre(c: int, k: int) -> int:
     return c * k * k + (k * k) // 2
 
 
-def features(x: torch.Tensor, forcing: torch.Tensor | None, shape: tuple[int, int], k: int) -> torch.Tensor:
-    """(B, grid, P): window(x), the forcing at the cell, and a constant 1 last."""
+def advection(x: torch.Tensor, shape: tuple[int, int], nlev: int) -> torch.Tensor:
+    """(B, grid, 8 nlev + 2) pairwise products at the cell: u dq/dx and v dq/dy for q in (temp, salin, u, v) on each level,
+    and ubaro dssh/dx, vbaro dssh/dy; centred differences in grid cells, zero on the image edge. These are CRAM's
+    pairwise terms (a product of two cells' states) in the one place a linear step cannot reach: advection."""
+    img = images(x, shape)
+    dx = torch.zeros_like(img)
+    dy = torch.zeros_like(img)
+    dx[..., 1:-1] = 0.5 * (img[..., 2:] - img[..., :-2])
+    dy[..., 1:-1, :] = 0.5 * (img[..., 2:, :] - img[..., :-2, :])
+    out = []
+    for k in range(nlev):
+        u, v = img[:, 2 * nlev + k], img[:, 3 * nlev + k]
+        for q in range(4):
+            out += [u * dx[:, q * nlev + k], v * dy[:, q * nlev + k]]
+    s = 4 * nlev
+    out += [img[:, s + 1] * dx[:, s], img[:, s + 2] * dy[:, s]]
+    return columns(torch.stack(out, 1))
+
+
+def features(x: torch.Tensor, forcing: torch.Tensor | None, shape: tuple[int, int], k: int, nlev: int = 0) -> torch.Tensor:
+    """(B, grid, P): window(x), with nlev > 0 the advection products, the forcing at the cell, and a constant 1 last."""
     parts = [window(x, shape, k)]
+    if nlev:
+        parts.append(advection(x, shape, nlev))
     if forcing is not None:
         parts.append(forcing)
     parts.append(torch.ones(*x.shape[:2], 1, dtype=x.dtype, device=x.device))
@@ -224,8 +245,10 @@ class StencilStep(torch.nn.Module):
     neural-lam, the boundary band takes the truth every step; points where a channel is not real keep the truth too
     (a constant in the pack)."""
 
-    def __init__(self, W, b, shape, k, keep_truth, state_mean, state_std, forcing_mean, forcing_std, forcing: bool = True):
+    def __init__(self, W, b, shape, k, keep_truth, state_mean, state_std, forcing_mean, forcing_std, forcing: bool = True,
+                 nlev: int = 0):
         super().__init__()
+        self.nlev = int(nlev)
         self.register_buffer("forcing_mean", torch.as_tensor(forcing_mean, dtype=torch.float32))
         self.register_buffer("forcing_std", torch.as_tensor(forcing_std, dtype=torch.float32))
         self.shape, self.k, self.use_forcing = tuple(shape), int(k), forcing
@@ -240,7 +263,7 @@ class StencilStep(torch.nn.Module):
         return self.W.device
 
     def step(self, x: torch.Tensor, forcing: torch.Tensor | None) -> torch.Tensor:
-        phi = features(x, forcing if self.use_forcing else None, self.shape, self.k)
+        phi = features(x, forcing if self.use_forcing else None, self.shape, self.k, self.nlev)
         return x + phi @ self.W.T + self.b
 
     def on_after_batch_transfer(self, batch, idx):
@@ -261,9 +284,9 @@ class StencilStep(torch.nn.Module):
         return torch.stack(out, 1), target, None, times
 
 
-def save_module(path: Path, W, b, shape, k, forcing: bool, info: dict) -> None:
+def save_module(path: Path, W, b, shape, k, forcing: bool, info: dict, nlev: int = 0) -> None:
     torch.save({"kind": KIND, "W": torch.as_tensor(W).float().cpu(), "b": None if b is None else torch.as_tensor(b).float().cpu(),
-                "shape": tuple(shape), "k": int(k), "forcing": forcing, "info": info}, path)
+                "shape": tuple(shape), "k": int(k), "forcing": forcing, "nlev": int(nlev), "info": info}, path)
 
 
 def is_stencil(path: Path) -> bool:
@@ -276,10 +299,10 @@ def load_module(path: Path, ds, device=None) -> StencilStep:
     """A StencilStep for datastore ds (its boundary mask, level_ocean and standardization)."""
     d = torch.load(path, map_location="cpu", weights_only=False)
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    return module_for(ds, d["W"], d["b"], d["shape"], d["k"], d["forcing"], device)
+    return module_for(ds, d["W"], d["b"], d["shape"], d["k"], d["forcing"], device, d.get("nlev", 0))
 
 
-def module_for(ds, W, b, shape, k, forcing: bool, device) -> StencilStep:
+def module_for(ds, W, b, shape, k, forcing: bool, device, nlev: int = 0) -> StencilStep:
     """A StencilStep with ds's boundary band, real-point masks and standardization."""
     meta = ds.meta
     names = ds.get_vars_names("state")
@@ -287,7 +310,7 @@ def module_for(ds, W, b, shape, k, forcing: bool, device) -> StencilStep:
     keep_truth = np.asarray(ds.boundary_mask.values, bool)[:, None] | ~lay.valid()
     st, fo = ds.get_standardization_dataarray("state"), ds.get_standardization_dataarray("forcing")
     return StencilStep(W, b, shape, k, keep_truth, st.state_mean.values, st.state_std.values, fo.forcing_mean.values,
-                       fo.forcing_std.values, forcing).to(device).eval()
+                       fo.forcing_std.values, forcing, nlev).to(device).eval()
 
 
 def describe(path: Path) -> str:
@@ -305,7 +328,8 @@ def _days(times: np.ndarray, start: str, end: str, every: int) -> list[int]:
 
 
 def accumulate(config: Path, out: Path, start: str, end: str, every: int, k: int, target: str = "diff",
-               per_cell: bool = False, forcing: bool = True, device: str | None = None, limit: int | None = None) -> GramSet:
+               per_cell: bool = False, forcing: bool = True, device: str | None = None, limit: int | None = None,
+               adv: bool = False) -> GramSet:
     """Grams of one-day pairs whose target day lies in [start, end], every `every` days, from the datastore's train split.
     target 'diff': phi = features(x_t, forcing), y = x_{t+1} - x_t (the stencil step). target 'state': phi = window(x_t)
     and a constant, y = x_t (the spatial conditionals of the realism energy). All in standardized units."""
@@ -327,7 +351,8 @@ def accumulate(config: Path, out: Path, start: str, end: str, every: int, k: int
     idx = [i for i in _days(times, start, end, every) if i in kept][:limit]
     C = len(names)
     nf = data[0][2].shape[-1] if (forcing and target == "diff") else 0
-    P = C * k * k + nf + 1
+    nlev = len(meta.level.values) if (adv and target == "diff") else 0
+    P = C * k * k + (8 * nlev + 2 if nlev else 0) + nf + 1
     gs = GramSet(P, C, lay.nclass, per_cell=per_cell).to(device)
     std = module_for(ds, torch.zeros(C, P), None, shape, k, bool(nf), device)
     for j, i in enumerate(idx):
@@ -336,7 +361,7 @@ def accumulate(config: Path, out: Path, start: str, end: str, every: int, k: int
         init, tgt, frc, _ = std.on_after_batch_transfer(tuple(a[None].to(device) for a in (init, tgt, frc, tm)), 0)
         x = init[:, 1]
         if target == "diff":
-            phi = features(x, frc[:, -1] if nf else None, shape, k)[0]
+            phi = features(x, frc[:, -1] if nf else None, shape, k, nlev)[0]
             y = (tgt[0, -1] - x[0])
         else:
             phi = features(x, None, shape, k)[0]
@@ -345,7 +370,7 @@ def accumulate(config: Path, out: Path, start: str, end: str, every: int, k: int
         if j % 50 == 0:
             print(f"accumulate {target}: {j + 1}/{len(idx)} {str(times[i])[:10]}", flush=True)
     gs.meta = {"config": str(config), "start": start, "end": end, "every": every, "k": k, "target": target,
-               "forcing": bool(nf), "days": len(idx), "first": str(times[idx[0]])[:10], "last": str(times[idx[-1]])[:10],
+               "forcing": bool(nf), "nlev": nlev, "days": len(idx), "first": str(times[idx[0]])[:10], "last": str(times[idx[-1]])[:10],
                "names": names, "levels": lay.levels.tolist(), "shape": list(shape)}
     gs.to("cpu").save(out)
     return gs
@@ -371,7 +396,8 @@ def fit(train: Path, held: Path, out_dir: Path, lambdas: list[float], device: st
     info = {"lambda": best["lambda"], "heldout_score": best["score"], "train": tr.meta, "held": {k_: v for k_, v in ho.meta.items() if k_ != "names"},
             "persistence_score": 1.0}
     W = ridge(tr, levels, best["lambda"])
-    save_module(out_dir / "stencil-shared.pt", W, None, shape, k, frc, {**info, "arm": "shared"})
+    nlev = tr.meta.get("nlev", 0)
+    save_module(out_dir / "stencil-shared.pt", W, None, shape, k, frc, {**info, "arm": "shared"}, nlev)
     res = {"lambdas": [{k_: v for k_, v in r.items() if k_ != "mse"} for r in table], "best": best["lambda"],
            "heldout_mse_per_channel": best["mse"], "names": tr.meta["names"]}
     if tr.per_cell:
@@ -382,7 +408,7 @@ def fit(train: Path, held: Path, out_dir: Path, lambdas: list[float], device: st
         valid = torch.as_tensor(_valid_from_meta(tr), device=device)
         b = torch.where(valid, b, torch.zeros_like(b))
         Wb[:, -1] = 0.0  # the per-cell bias carries the constant
-        save_module(out_dir / "stencil-bias.pt", Wb, b, shape, k, frc, {**info, "arm": "bias"})
+        save_module(out_dir / "stencil-bias.pt", Wb, b, shape, k, frc, {**info, "arm": "bias"}, nlev)
         res["bias_abs_mean"] = float(b.abs().mean())
     (out_dir / "fit.json").write_text(json.dumps(res, indent=1))
     return res
@@ -422,6 +448,7 @@ def main() -> None:
     a.add_argument("--target", choices=("diff", "state"), default="diff")
     a.add_argument("--per-cell", action="store_true")
     a.add_argument("--no-forcing", action="store_true")
+    a.add_argument("--adv", action="store_true", help="add the advection products (stencil.advection)")
     a.add_argument("--limit", type=int)
     f = sub.add_parser("fit", help="ridge solve with lambda chosen on held-out Grams; writes stencil-*.pt")
     f.add_argument("train", type=Path)
@@ -433,7 +460,7 @@ def main() -> None:
     args = p.parse_args()
     if args.cmd == "accumulate":
         accumulate(args.config, args.out, args.start, args.end, args.every, args.k, args.target, args.per_cell,
-                   not args.no_forcing, limit=args.limit)
+                   not args.no_forcing, limit=args.limit, adv=args.adv)
     elif args.cmd == "fit":
         print(json.dumps({k_: v for k_, v in fit(args.train, args.held, args.out_dir, [float(x) for x in args.lambdas.split(",")]).items()
                           if k_ != "heldout_mse_per_channel"}, indent=1))
