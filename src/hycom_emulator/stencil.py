@@ -376,7 +376,7 @@ def accumulate(config: Path, out: Path, start: str, end: str, every: int, k: int
     return gs
 
 
-def fit(train: Path, held: Path, out_dir: Path, lambdas: list[float], device: str | None = None) -> dict:
+def fit(train: Path, held: Path, out_dir: Path, lambdas: list[float], device: str | None = None, save_all: bool = False) -> dict:
     """Choose one ridge lambda by the held-out Grams (mean over channels of held-out MSE / held-out mean square of the
     target), then write stencil-shared.pt (constant only) and, when the train Grams carry per-cell sums,
     stencil-bias.pt (CRAM's per-cell bias, the exact fixed-effects solve at the same lambda)."""
@@ -386,8 +386,12 @@ def fit(train: Path, held: Path, out_dir: Path, lambdas: list[float], device: st
     shape, k, frc = tuple(tr.meta["shape"]), tr.meta["k"], tr.meta["forcing"]
     scale = torch.stack([ho.cumulative(int(levels[c]))[2][c] / ho.cumulative(int(levels[c]))[3] for c in range(tr.C)])
     table = []
+    out_dir.mkdir(parents=True, exist_ok=True)
     for lam in lambdas:
         W = ridge(tr, levels, lam)
+        if save_all:  # every lambda's shared stencil, for selection by held-out free runs
+            save_module(out_dir / f"stencil-shared-l{lam:g}.pt", W, None, tuple(tr.meta["shape"]), tr.meta["k"], tr.meta["forcing"],
+                        {"lambda": lam, "arm": "shared"}, tr.meta.get("nlev", 0))
         mse = heldout_mse(ho, W, levels)
         table.append({"lambda": lam, "score": float((mse / scale).mean()), "mse": mse.cpu().tolist()})
         print(f"lambda {lam:g}: held-out MSE / mean square {table[-1]['score']:.4f}", flush=True)
@@ -455,6 +459,7 @@ def main() -> None:
     f.add_argument("held", type=Path)
     f.add_argument("out_dir", type=Path)
     f.add_argument("--lambdas", default="1e-4,1e-3,1e-2,1e-1,1")
+    f.add_argument("--save-all", action="store_true", help="also write stencil-shared-l<lambda>.pt for every lambda")
     d = sub.add_parser("describe")
     d.add_argument("path", type=Path)
     args = p.parse_args()
@@ -462,7 +467,7 @@ def main() -> None:
         accumulate(args.config, args.out, args.start, args.end, args.every, args.k, args.target, args.per_cell,
                    not args.no_forcing, limit=args.limit, adv=args.adv)
     elif args.cmd == "fit":
-        print(json.dumps({k_: v for k_, v in fit(args.train, args.held, args.out_dir, [float(x) for x in args.lambdas.split(",")]).items()
+        print(json.dumps({k_: v for k_, v in fit(args.train, args.held, args.out_dir, [float(x) for x in args.lambdas.split(",")], save_all=args.save_all).items()
                           if k_ != "heldout_mse_per_channel"}, indent=1))
     else:
         print(describe(args.path))
