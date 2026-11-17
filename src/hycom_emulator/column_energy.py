@@ -221,6 +221,89 @@ def train_energy(bins: np.ndarray, q: int, season: np.ndarray | None = None, ste
     return model, log
 
 
+class MaskedColumn(torch.nn.Module):
+    """The masked arm. Same pairwise tables, but the conditioning side has a 'missing' symbol (index Q): the logits of
+    cell i are -(B_i + sum_{j != i} K_ij[:, x_j]) with x_j in 0..Q, so a cell can be predicted from any subset of the
+    others. Trained with random masks (masked pseudolikelihood: each draw hides a random share of the cells and scores
+    the hidden ones), sampled in a random order from the clamped cells (any-order sampling). Not a joint energy: a
+    dependency network on CRAM's pairwise tables. Plain pseudolikelihood never sees missing neighbours, so with only SSH
+    and SST given its Gibbs chain leans on neighbour couplings it cannot use (the dev smoke of 2026-11-17)."""
+
+    def __init__(self, n: int, q: int, season: bool = False):
+        super().__init__()
+        self.n, self.q = n, q
+        self.W = torch.nn.Parameter(torch.zeros(n * (q + 1), n * q))
+        self.B = torch.nn.Parameter(torch.zeros(n, q))
+        self.S = torch.nn.Parameter(torch.zeros(2, n, q)) if season else None
+        rows = torch.arange(n).repeat_interleave(q + 1)
+        cols = torch.arange(n).repeat_interleave(q)
+        self.register_buffer("off", (rows[:, None] != cols[None, :]).float())
+
+    def bias(self, season, m):
+        if self.S is None or season is None:
+            return self.B.expand(m, -1, -1)
+        return self.B + torch.einsum("ms,snq->mnq", season, self.S)
+
+    def logits(self, x: torch.Tensor, season=None) -> torch.Tensor:
+        """(m, N, Q) for x (m, N) with symbols 0..Q (Q = missing)."""
+        X = torch.nn.functional.one_hot(x, self.q + 1).float().reshape(x.shape[0], -1)
+        return -(self.bias(season, x.shape[0]) + (X @ (self.W * self.off)).reshape(-1, self.n, self.q))
+
+    def masked_loss(self, x: torch.Tensor, season, g: torch.Generator) -> torch.Tensor:
+        rate = torch.rand(x.shape[0], 1, generator=g)
+        hide = torch.rand(x.shape, generator=g) < rate
+        hide[hide.sum(1) == 0, 0] = True
+        xm = torch.where(hide, torch.full_like(x, self.q), x)
+        lp = torch.log_softmax(self.logits(xm, season), -1).gather(2, x[..., None])[..., 0]
+        return -(lp * hide).sum() / hide.sum()
+
+
+def train_masked(bins: np.ndarray, q: int, season: np.ndarray | None = None, steps: int = 1000, batch: int = 2048,
+                 lr: float = 1e-2, l1: float = 0.3, seed: int = 0, val_frac: float = 0.05, log_every: int = 100):
+    """Masked pseudolikelihood with Adam and a proximal L1 step on the coupling. Returns (model, log)."""
+    g = torch.Generator().manual_seed(seed)
+    x = torch.as_tensor(bins, dtype=torch.long)
+    s = None if season is None else torch.as_tensor(season, dtype=torch.float32)
+    perm = torch.randperm(x.shape[0], generator=g)
+    nval = int(val_frac * x.shape[0])
+    vi, ti = perm[:nval], perm[nval:]
+    model = MaskedColumn(x.shape[1], q, season is not None)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    log = []
+    for step in range(1, steps + 1):
+        idx = ti[torch.randint(ti.numel(), (min(batch, ti.numel()),), generator=g)]
+        loss = model.masked_loss(x[idx], None if s is None else s[idx], g)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        with torch.no_grad():
+            model.W.copy_(torch.sign(model.W) * (model.W.abs() - lr * l1).clamp_min(0))
+        if step % log_every == 0 or step == steps:
+            with torch.no_grad():
+                val = model.masked_loss(x[vi], None if s is None else s[vi], torch.Generator().manual_seed(1)).item() if nval else float("nan")
+            log.append({"step": step, "train_mpl": loss.item(), "val_mpl": val})
+    return model, log
+
+
+@torch.no_grad()
+def sample_masked(model: MaskedColumn, x0: torch.Tensor, clamp: torch.Tensor, season=None, members: int = 32, seed: int = 0) -> torch.Tensor:
+    """(m, members, N): free cells start missing and are drawn one at a time in a random order per member."""
+    g = torch.Generator().manual_seed(seed)
+    n, q = model.n, model.q
+    x = x0.repeat_interleave(members, 0).clone()
+    free = torch.nonzero(~clamp).flatten()
+    x[:, free] = q
+    s = None if season is None else season.repeat_interleave(members, 0)
+    order = torch.argsort(torch.rand(x.shape[0], free.numel(), generator=g), 1)
+    rows = torch.arange(x.shape[0])
+    for t in range(free.numel()):
+        cell = free[order[:, t]]
+        lg = model.logits(x, s)[rows, cell]
+        u = torch.rand(lg.shape, generator=g).clamp_min(1e-12)
+        x[rows, cell] = torch.argmax(lg - torch.log(-torch.log(u)), 1)
+    return x.reshape(x0.shape[0], members, n)
+
+
 @torch.no_grad()
 def gibbs(model: ColumnEnergy, x0: torch.Tensor, clamp: torch.Tensor, season: torch.Tensor | None = None,
           chains: int = 8, burn: int = 100, keep: int = 4, thin: int = 10, seed: int = 0) -> torch.Tensor:
@@ -305,18 +388,18 @@ def fit(args) -> None:
     bins = to_bins(vals, edges)
     med = bin_medians(vals, bins, args.q)
     t0 = time.time()
-    model, log = train_energy(bins, args.q, season if args.season else None, args.steps, args.batch, args.lr,
-                              args.l1, args.seed)
+    trainer = train_masked if args.objective == "masked" else train_energy
+    model, log = trainer(bins, args.q, season if args.season else None, args.steps, args.batch, args.lr, args.l1, args.seed)
     t_train = time.time() - t0
     ntarget = 2 * len(src.depths)
     beta, cov = fit_gaussian(vals, season, src.cells, ntarget)
     clim = np.quantile(vals[:, :ntarget], (np.arange(args.clim_members) + 0.5) / args.clim_members, axis=0)
     with torch.no_grad():
-        k = model.kmat()
+        k = model.kmat() if args.objective == "pl" else model.W * model.off
     nz = float((k != 0).float().sum() / model.off.sum())
     info = {"columns": int(len(vals)), "days": int(np.unique(days).size), "load_s": t_load, "train_s": t_train,
             "coupling_nonzero": nz, "log": log}
-    torch.save({"state_dict": model.state_dict(), "n": model.n, "q": args.q, "season": args.season,
+    torch.save({"state_dict": model.state_dict(), "n": model.n, "q": args.q, "season": args.season, "objective": args.objective,
                 "cells": src.cells, "edges": edges, "medians": med, "gauss_beta": beta, "gauss_cov": cov,
                 "clim": clim.astype(np.float32), "info": info, "args": vars(args)}, args.out)
     print(json.dumps({k: v for k, v in info.items() if k != "log"} | {"last": log[-1]}, indent=1))
@@ -324,7 +407,8 @@ def fit(args) -> None:
 
 def evaluate(args) -> None:
     ck = torch.load(args.ckpt, weights_only=False)
-    model = ColumnEnergy(ck["n"], ck["q"], ck["season"])
+    masked = ck.get("objective", "pl") == "masked"
+    model = (MaskedColumn if masked else ColumnEnergy)(ck["n"], ck["q"], ck["season"])
     model.load_state_dict(ck["state_dict"])
     cells, med = ck["cells"], ck["medians"]
     src = open_source(args.source, args.meta)
@@ -342,7 +426,10 @@ def evaluate(args) -> None:
     for a in range(0, len(vals), args.batch):
         xb = torch.as_tensor(bins[a:a + args.batch], dtype=torch.long)
         sb = torch.as_tensor(season[a:a + args.batch]) if ck["season"] else None
-        d = gibbs(model, xb, clamp, sb, args.chains, args.burn, args.keep, args.thin, args.seed + a).numpy()
+        if masked:
+            d = sample_masked(model, xb, clamp, sb, args.chains * args.keep, args.seed + a).numpy()
+        else:
+            d = gibbs(model, xb, clamp, sb, args.chains, args.burn, args.keep, args.thin, args.seed + a).numpy()
         ens.append(np.take_along_axis(med[None, None, :, :], d[..., None], 3)[..., 0][:, :, :ntarget])
     ens = np.concatenate(ens)
     t_gibbs = time.time() - t0
@@ -356,7 +443,7 @@ def evaluate(args) -> None:
              for m, s in scores.items()}
     t_band = [c for c in cells[:ntarget] if c.startswith("temp_") and 100 <= float(c[5:-1]) <= 500]
     band = {m: {k: float(np.mean([table[m][k][c] for c in t_band])) for k in table[m]} for m in table}
-    out = {"columns": int(len(y)), "days": int(np.unique(days).size), "members": int(ens.shape[1]),
+    out = {"columns": int(len(y)), "days": int(np.unique(days).size), "members": int(ens.shape[1]), "objective": ck.get("objective", "pl"),
            "gibbs": {"chains": args.chains, "burn": args.burn, "keep": args.keep, "thin": args.thin,
                      "sweeps": args.burn + args.keep * args.thin, "seconds": t_gibbs},
            "temp_100_500m": band, "per_cell": table}
@@ -393,6 +480,7 @@ def main(argv=None) -> None:
     f.add_argument("--per-day", type=int, default=200)
     f.add_argument("--q", type=int, default=24)
     f.add_argument("--season", action="store_true")
+    f.add_argument("--objective", choices=("pl", "masked"), default="pl", help="pl: CRAM pseudolikelihood; masked: MaskedColumn")
     f.add_argument("--steps", type=int, default=1000)
     f.add_argument("--batch", type=int, default=2048)
     f.add_argument("--lr", type=float, default=1e-2)

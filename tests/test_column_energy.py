@@ -98,3 +98,34 @@ def test_quantile_bins_and_medians():
     assert np.all(np.diff(med[0]) > 0)
     assert np.isfinite(med).all()
     assert set(np.unique(np.take_along_axis(med, b.T, 1)[1])) == {0.0, 1.0}
+
+
+def test_masked_sampler_respects_clamps_and_fills_every_cell():
+    import torch
+
+    from hycom_emulator.column_energy import MaskedColumn, sample_masked
+
+    m = MaskedColumn(4, 3)
+    with torch.no_grad():
+        m.W.normal_()
+    x0 = torch.tensor([[2, 0, 1, 1]])
+    clamp = torch.tensor([True, False, False, True])
+    d = sample_masked(m, x0, clamp, members=16, seed=0)
+    assert d.shape == (1, 16, 4)
+    assert (d[0, :, 0] == 2).all() and (d[0, :, 3] == 1).all()
+    assert (d < 3).all()
+
+
+def test_masked_loss_learns_a_copy():
+    import numpy as np
+    import torch
+
+    from hycom_emulator.column_energy import train_masked
+
+    rng = np.random.default_rng(0)
+    a = rng.integers(0, 3, 4000)
+    bins = np.stack([a, a, rng.integers(0, 3, 4000)], 1)
+    model, _ = train_masked(bins, 3, steps=400, batch=512, lr=5e-2, l1=0.0)
+    x = torch.tensor([[1, 3, 3]])  # cell 0 known, cell 1 missing
+    p = torch.softmax(model.logits(x)[0, 1], -1)
+    assert p[1] > 0.9
