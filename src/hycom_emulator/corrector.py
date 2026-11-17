@@ -10,8 +10,9 @@ For a deterministic free run x_hat (any checkpoint rollout_rea loads) and lead b
    column covariance Sigma_b (91 x 91), both from train residuals (realism-style conditionals).
 3. Members: block Gibbs on r with 9 colours (cells three apart in x and y share no 5 x 5 window), r clamped to 0 on the
    boundary band and below the bottom (the givens, as CRAM clamps a puzzle's clues), starting from 0, `sweeps` sweeps at
-   temperature T_b. The chain is linear in its noise, so the spread scales as sqrt(T_b) exactly; T_b is set on
-   held-out train-year runs so that spread over error of the ensemble mean is 1.
+   temperature 1, then each field's residual is multiplied by a factor per lead bin. The chain is linear in its noise, so
+   spread scales exactly with the factor; it is set on held-out train-year runs so that spread over error of the
+   ensemble mean is 1 per field (one temperature for all fields left salinity 1.2-1.5 and SSH 0.5-0.6 on the probe).
 
     python -m hycom_emulator.corrector collect <nlam.yaml> <ckpt> <out_dir> --stage mean|resid --starts ... [--mean mean.pt]
     python -m hycom_emulator.corrector fit-mean <train_dir> <held_dir> <mean.pt>
@@ -185,9 +186,11 @@ class Sampler:
         self.cells = [torch.nonzero(free & (colour == q)).squeeze(1) for q in range(9)]
         self.W, self.L = noise["W"][jb].to(device), noise["L"][jb].to(device)
         self.T = float(noise["T"][jb])
+        self.scale = noise["scale"][jb].to(device) if "scale" in noise else None  # (C,) per-field spread factors
         self.valid = valid.float()
 
-    def sample(self, M: int, sweeps: int, gen: torch.Generator, T: float | None = None) -> torch.Tensor:
+    def sample(self, M: int, sweeps: int, gen: torch.Generator, T: float | None = None, raw: bool = False) -> torch.Tensor:
+        """M residual fields; raw=True skips the per-field spread factors (calibration runs raw)."""
         T = self.T if T is None else T
         C = self.W.shape[0]
         r = torch.zeros(M, self.valid.shape[0], C, device=self.W.device)
@@ -197,7 +200,7 @@ class Sampler:
                 mu = apply(self.W, r, self.shape, self.k)[:, q]
                 eps = torch.randn(M, q.numel(), self.L.shape[1], generator=gen, device="cpu").to(r.device)
                 r[:, q] = (mu + sq * eps @ self.L.T) * self.valid[q]
-        return r
+        return r if raw or self.scale is None else r * self.scale
 
 
 def _weights(m, f):
@@ -250,9 +253,8 @@ def _setup(config, ckpt, mean, noise, k_default=5):
 
 def calibrate(config: Path, ckpt: Path, mean: Path, noise: Path, starts: list[str], horizon: int, M: int, sweeps: int,
               batch: int, seed: int = 0) -> dict:
-    """Run at T = 1 on held-out starts; per lead bin, ratio = mean over fields of spread / RMSE of the ensemble mean
-    (pooled as root mean squares over starts and leads); T_b = 1 / ratio^2 (spread is linear in sqrt T). Writes T into
-    noise.pt."""
+    """Run at T = 1 on held-out starts; per lead bin and field, ratio = spread / RMSE of the ensemble mean (pooled as root
+    mean squares over starts and leads, finite-M corrected); writes scale = 1 / ratio per channel into noise.pt."""
     from hycom_emulator import rollout_rea as rr
 
     m, dev, A, N, valid, free = _setup(config, ckpt, mean, noise)
@@ -267,17 +269,23 @@ def calibrate(config: Path, ckpt: Path, mean: Path, noise: Path, starts: list[st
             xh = s.z(step.pred)
             mu = xh + apply(A["A"][jb], xh, m.shape, A["k"])
             for i in range(xh.shape[0]):
-                r = samplers[jb].sample(M, sweeps, gen, T=1.0)
+                r = samplers[jb].sample(M, sweeps, gen, T=1.0, raw=True)
                 st = ens_stats(s.raw(mu[i][None] + r), step.truth[i], m)
                 for a, f in enumerate(FIELDS):
                     acc[jb, a] += (st[f"spread_{f}"] ** 2, st[f"rmse_{f}"] ** 2)
         rr.release_pack_pages(m.datastore)
         print(f"calibrate: starts {b0 + 1}..{min(b0 + batch, len(todo))} of {len(todo)}", flush=True)
     ratio = np.sqrt(acc[..., 0] / acc[..., 1]) * np.sqrt((M + 1) / M)  # spread over error with the finite-M factor
-    T = 1.0 / ratio.mean(1) ** 2
+    # The chain at T = 1 is linear in its noise, so multiplying a field's residual by 1 / ratio sets its spread over
+    # error to 1. One factor per lead bin and field (temp, salin, u, v by name; ssh, ubaro, vbaro take ssh's).
     d = torch.load(noise, map_location="cpu", weights_only=False)
-    d["T"] = torch.as_tensor(T, dtype=torch.float32)
-    d["calibration"] = {"starts": [str(t.date) for t in todo], "M": M, "sweeps": sweeps, "ratio_at_T1": ratio.tolist(), "T": T.tolist()}
+    from hycom_emulator.realism import group_of
+    names = m.geo.names
+    fld = [FIELDS.index(g) if (g := group_of(n)) in FIELDS else FIELDS.index("ssh") for n in names]
+    d["T"] = torch.ones(len(LEAD_BINS))
+    d["scale"] = torch.as_tensor(1.0 / ratio[:, fld], dtype=torch.float32)
+    d["calibration"] = {"starts": [str(t.date) for t in todo], "M": M, "sweeps": sweeps, "ratio_at_T1": ratio.tolist(),
+                        "fields": list(FIELDS), "scale_by_field": (1.0 / ratio).tolist()}
     torch.save(d, noise)
     return d["calibration"]
 
