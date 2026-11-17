@@ -299,7 +299,6 @@ def evaluate(config: Path, ckpt: Path, mean: Path, noise: Path, out: Path, start
         d = torch.load(energy, map_location="cpu", weights_only=False)
         E = Energy(d, _region(m.datastore), m.meta.level_ocean.values, [float(z) for z in m.meta.level.values], dev)
         bnd = json.loads(Path(band_json).read_text())
-    ke = rr.STATS["ke"].fn
     rows = []
     todo = _starts(m, starts, horizon)
     for b0 in range(0, len(todo), batch):
@@ -319,7 +318,7 @@ def evaluate(config: Path, ckpt: Path, mean: Path, noise: Path, out: Path, start
                     from hycom_emulator.rollout_rea import Step
                     st = Step(x, step.truth[i][None].expand(x.shape[0], -1, -1), step.x0[i][None].expand(x.shape[0], -1, -1),
                               step.pred_prev[i][None].expand(x.shape[0], -1, -1), step.truth_prev[i][None].expand(x.shape[0], -1, -1))
-                    return ke(st, m.geo)
+                    return rr.ke(st, m.geo, "pred") / rr.ke(st, m.geo, "truth")
 
                 extra = {"ke_ratio_base": float(kef(step.pred[i][None])[0]), "ke_ratio_members": float(kef(mem).mean()),
                          "ke_ratio_meancorr": float(kef(s.raw(mu[i])[None])[0])}
