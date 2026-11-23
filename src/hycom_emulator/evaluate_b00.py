@@ -109,6 +109,10 @@ def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int, model:
     config, ds = load_config_and_datastore(config_path=str(config_path))
     data = WeatherDataset(ds, split=split, ar_steps=ar_steps, num_past_forcing_steps=1, num_future_forcing_steps=1)
     module = None
+    if ckpt is not None and Path(ckpt).suffix == ".pt":  # a hycom_emulator.stencil step, not a Lightning checkpoint
+        from hycom_emulator.stencil import load_module
+
+        return ds, data, load_module(ckpt, ds)
     if ckpt is not None:
         from neural_lam.models import MODELS, ForecasterModule
         from neural_lam.train_model import build_predictor
