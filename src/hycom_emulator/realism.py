@@ -27,6 +27,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from hycom_emulator.forcing_mode import Forcing
 from hycom_emulator.stencil import GramSet, Layout, centre, features, heldout_mse, ridge
 
 GROUPS = ("temp", "salin", "u", "v", "ssh", "baro")
@@ -157,7 +158,7 @@ def score(config: Path, energy: Path, band_json: Path, out: Path, models: dict[s
     rows = []
     gen = torch.Generator().manual_seed(0)
     for i, (name, ckpt) in enumerate(models.items()):
-        m = rr.load_model(config, ckpt)
+        m = rr.load_model(config, ckpt, forcing=Forcing.ORACLE)
         dev = m.module.device
         d = torch.load(energy, map_location="cpu", weights_only=False)
         E = Energy(d, _region(m.datastore), m.meta.level_ocean.values, [float(z) for z in m.meta.level.values], dev)

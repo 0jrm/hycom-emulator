@@ -22,9 +22,9 @@ def persistence_losses(config_path: str, split: str, ar_steps: int, loss_name: s
     from neural_lam import metrics
     from neural_lam.config import load_config_and_datastore
     from neural_lam.loss_weighting import get_state_feature_weighting
-    from neural_lam.weather_dataset import WeatherDataset
 
     import hycom_emulator.datastore  # noqa: F401  registers the hycom kind (and hycom_wmse's settings)
+    from hycom_emulator.forcing_mode import Forcing, forecast_windows
     from hycom_emulator.physics import hycom_wmse
 
     config, ds = load_config_and_datastore(config_path=config_path)
@@ -35,11 +35,11 @@ def persistence_losses(config_path: str, split: str, ar_steps: int, loss_name: s
     per_var_std = diff_std / torch.sqrt(w)
     mask = torch.tensor(~ds.boundary_mask.values.astype(bool))
     loss = {"wmse": metrics.wmse, "hycom_wmse": hycom_wmse}[loss_name]
-    data = WeatherDataset(ds, split=split, ar_steps=ar_steps, num_past_forcing_steps=1, num_future_forcing_steps=1)
+    data = forecast_windows(ds, split, ar_steps, forcing=Forcing.ORACLE)  # persistence reads no forcing; any mode scores the same
     idx = np.arange(len(data)) if n is None else np.linspace(0, len(data) - 1, min(n, len(data))).astype(int)
     rows = []
     for i in idx:
-        init, target, _, _ = data[i]
+        init, target = data[i].init, data[i].truth
         x0, target = (init[1] - mean) / std, (target - mean) / std
         rows.append([loss(x0[None], target[k][None], per_var_std, mask=mask).item() for k in range(ar_steps)])
     return np.array(rows)

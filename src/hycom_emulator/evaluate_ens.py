@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 
 from hycom_emulator.evaluate_rea import LEVEL_VARS, cell_area, level_weights, pack_path, point_weights, regions
+from hycom_emulator.forcing_mode import FREE_FORECAST_LABEL, Forcing, forecast_windows
 
 SUMS = ("w", "e2_mean", "e2_member", "var", "crps", "e2_pers")
 
@@ -67,19 +68,18 @@ def summarize(acc: dict, names: list[str], dz: np.ndarray, members: int) -> dict
     return out
 
 
-def load(config: Path, ckpt: Path, split: str, ar_steps: int):
-    """(datastore, WeatherDataset of the split, EnsembleForecasterModule on the GPU if there is one)."""
+def load(config: Path, ckpt: Path, split: str, ar_steps: int, *, forcing: Forcing):
+    """(datastore, forcing_mode.Windows of the split, EnsembleForecasterModule on the GPU if there is one)."""
     import torch
     from neural_lam.config import load_config_and_datastore
     from neural_lam.models import MODELS, ARForecaster
     from neural_lam.train_model import build_predictor
-    from neural_lam.weather_dataset import WeatherDataset
 
     import hycom_emulator.datastore  # noqa: F401  registers the hycom kind
     from hycom_emulator.ensemble import EnsembleForecasterModule
 
     nl_config, ds = load_config_and_datastore(config_path=str(config))
-    data = WeatherDataset(ds, split=split, ar_steps=ar_steps, num_past_forcing_steps=1, num_future_forcing_steps=1)
+    data = forecast_windows(ds, split, ar_steps, forcing=forcing)
     args = torch.load(ckpt, map_location="cpu", weights_only=False)["hyper_parameters"]["args"]
     forecaster = ARForecaster(build_predictor(MODELS[args.model], args, nl_config, ds), ds)
     module = EnsembleForecasterModule.load_from_checkpoint(str(ckpt), forecaster=forecaster, datastore=ds, weights_only=False, map_location="cpu")
@@ -87,20 +87,21 @@ def load(config: Path, ckpt: Path, split: str, ar_steps: int):
 
 
 def ensemble_forecast(module, sample, members: int) -> np.ndarray:
-    """(member, lead, grid, state_feature) forecasts in physical units for one WeatherDataset sample."""
+    """(member, lead, grid, state_feature) forecasts in physical units for one forcing_mode.Window."""
     import torch
 
-    batch = tuple(t[None].to(module.device) for t in sample)
+    batch = tuple(t[None].to(module.device) for t in sample.batch)
     with torch.no_grad():
         init, target, forcing, _ = module.on_after_batch_transfer(batch, 0)
         ens = module.forecast_members(init, forcing, target, members)[0]
     return (ens * module.state_std + module.state_mean).cpu().numpy()
 
 
-def evaluate(config: Path, ckpt: Path, members: int, split: str, ar_steps: int, limit: int | None, region_name: str) -> dict:
+def evaluate(config: Path, ckpt: Path, members: int, split: str, ar_steps: int, limit: int | None, region_name: str, *,
+             forcing: Forcing) -> dict:
     import xarray as xr
 
-    ds, data, module = load(config, ckpt, split, ar_steps)
+    ds, data, module = load(config, ckpt, split, ar_steps, forcing=forcing)
     meta = xr.open_zarr(pack_path(config) / "meta.zarr", consolidated=True).load()
     names = [str(n) for n in meta.state_feature.values]
     assert names == ds.get_vars_names("state"), "datastore and meta.zarr disagree on state features"
@@ -110,9 +111,9 @@ def evaluate(config: Path, ckpt: Path, members: int, split: str, ar_steps: int, 
     indices = range(len(data))[:limit]
     for i in indices:
         sample = data[i]
-        accumulate(acc, sample[0][-1].numpy(), sample[1].numpy(), ensemble_forecast(module, sample, members), w)
+        accumulate(acc, sample.init[-1].numpy(), sample.truth.numpy(), ensemble_forecast(module, sample, members), w)
     return {
-        "label": "free forecast given the true daily wind and boundary band (no increments, no observations after t0)",
+        "label": FREE_FORECAST_LABEL[forcing], "forcing": forcing.name,
         "region": region_name, "split": split, "ar_steps": ar_steps, "members": members, "checkpoint": str(ckpt),
         "samples": len(indices), "fields": summarize(acc, names, level_weights(levels), members),
     }
@@ -131,7 +132,7 @@ def main() -> None:
     a = p.parse_args()
     if a.members < 2:
         p.error("--members must be at least 2")
-    r = evaluate(a.config, a.ckpt, a.members, a.split, a.ar_steps, a.limit, a.region)
+    r = evaluate(a.config, a.ckpt, a.members, a.split, a.ar_steps, a.limit, a.region, forcing=Forcing.ORACLE)
     a.out.write_text(json.dumps(r, indent=1))
     for name in (*LEVEL_VARS, "ssh"):
         row = " ".join(f"{lead}d {s['spread_skill']:.2f}" for lead, s in r["fields"][name].items())

@@ -32,6 +32,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from hycom_emulator.forcing_mode import Forcing
 from hycom_emulator.stencil import GramSet, Layout, centre, columns, features, heldout_mse, images, ridge, rows_by_class
 
 LEAD_BINS = ((1, 1), (2, 3), (4, 7), (8, 14), (15, 21))
@@ -83,7 +84,7 @@ def collect(config: Path, ckpt: Path, out: Path, stage: str, starts: list[str], 
     r = y - x_hat - A phi(x_hat) against r itself (realism-style, for the conditionals and Sigma)."""
     from hycom_emulator import rollout_rea as rr
 
-    m = rr.load_model(config, ckpt)
+    m = rr.load_model(config, ckpt, forcing=Forcing.ORACLE)
     dev = m.module.device
     s = Standardizer(m.datastore, dev)
     lay = _layout(m, k)
@@ -108,7 +109,7 @@ def collect(config: Path, ckpt: Path, out: Path, stage: str, starts: list[str], 
         print(f"collect {stage}: starts {b0 + 1}..{min(b0 + batch, len(todo))} of {len(todo)}", flush=True)
     out.mkdir(parents=True, exist_ok=True)
     meta = {"config": str(config), "ckpt": str(ckpt), "stage": stage, "k": k, "starts": [str(t.date) for t in todo],
-            "horizon": horizon, "names": m.geo.names, "levels": lay.levels.tolist(), "shape": list(m.shape)}
+            "forcing": Forcing.ORACLE.name, "horizon": horizon, "names": m.geo.names, "levels": lay.levels.tolist(), "shape": list(m.shape)}
     for jb, g in enumerate(grams):
         g.meta = {**meta, "bin": list(LEAD_BINS[jb])}
         g.to("cpu").save(out / f"grams_b{jb}.pt")
@@ -241,7 +242,7 @@ def point_stats(x: torch.Tensor, truth: torch.Tensor, m) -> dict:
 def _setup(config, ckpt, mean, noise, k_default=5):
     from hycom_emulator import rollout_rea as rr
 
-    m = rr.load_model(config, ckpt)
+    m = rr.load_model(config, ckpt, forcing=Forcing.ORACLE)
     dev = m.module.device
     A = torch.load(mean, map_location=dev, weights_only=False)
     N = torch.load(noise, map_location="cpu", weights_only=False) if noise else None
@@ -348,7 +349,7 @@ def evaluate(config: Path, ckpt: Path, mean: Path, noise: Path, out: Path, start
         w.writeheader()
         w.writerows(rows)
     (out / "evaluate.json").write_text(json.dumps({"ckpt": str(ckpt), "mean": str(mean), "noise": str(noise), "M": M,
-                                                   "sweeps": sweeps, "starts": [str(t.date) for t in todo], "horizon": horizon,
+                                                   "forcing": Forcing.ORACLE.name, "sweeps": sweeps, "starts": [str(t.date) for t in todo], "horizon": horizon,
                                                    "T": N["T"].tolist(), "seed": seed}, indent=1))
 
 

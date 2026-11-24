@@ -26,6 +26,7 @@ import numpy as np
 import torch
 
 from hycom_emulator.evaluate_rea import LEVEL_VARS, cell_area, level_weights, pack_path, point_weights, regions
+from hycom_emulator.forcing_mode import FREE_FORECAST_LABEL, Forcing, forecast_windows
 from hycom_emulator.gauss import gaussian_crps
 
 def _sigma_terms(err: np.ndarray, mean: np.ndarray, sigma: np.ndarray, truth: np.ndarray, suffix: str) -> dict:
@@ -72,8 +73,8 @@ def summarize(acc: dict, names: list[str], dz: np.ndarray) -> dict:
 
 
 def gaussian_forecast(module, sample) -> tuple[np.ndarray, np.ndarray]:
-    """(mean, sigma), each (lead, grid, state_feature) in physical units, for one WeatherDataset sample."""
-    batch = tuple(t[None].to(module.device) for t in sample)
+    """(mean, sigma), each (lead, grid, state_feature) in physical units, for one forcing_mode.Window."""
+    batch = tuple(t[None].to(module.device) for t in sample.batch)
     with torch.no_grad():
         pred, _, sigma, _ = module.common_step(module.on_after_batch_transfer(batch, 0))
     if sigma is None:
@@ -83,13 +84,12 @@ def gaussian_forecast(module, sample) -> tuple[np.ndarray, np.ndarray]:
 
 
 def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | None, region_name: str,
-             calibrate_on: str | None = None) -> dict:
+             calibrate_on: str | None = None, *, forcing: Forcing) -> dict:
     import xarray as xr
-    from neural_lam.weather_dataset import WeatherDataset
 
     from hycom_emulator.evaluate_b00 import load
 
-    ds, data, module = load(config, ckpt, split, ar_steps)
+    ds, data, module = load(config, ckpt, split, ar_steps, forcing=forcing)
     meta = xr.open_zarr(pack_path(config) / "meta.zarr", consolidated=True).load()
     names = [str(n) for n in meta.state_feature.values]
     assert names == ds.get_vars_names("state"), "datastore and meta.zarr disagree on state features"
@@ -101,16 +101,16 @@ def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | N
         indices = range(len(dataset))[:limit]
         for i in indices:
             sample = dataset[i]
-            accumulate(acc, sample[0][-1].numpy(), sample[1].numpy(), *gaussian_forecast(module, sample), w, scale)
+            accumulate(acc, sample.init[-1].numpy(), sample.truth.numpy(), *gaussian_forecast(module, sample), w, scale)
         return acc, len(indices)
 
     out = {
-        "label": "free forecast given the true daily wind and boundary band (no increments, no observations after t0)",
+        "label": FREE_FORECAST_LABEL[forcing], "forcing": forcing.name,
         "region": region_name, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt),
     }
     scale = None
     if calibrate_on:
-        fit, n = scored(WeatherDataset(ds, split=calibrate_on, ar_steps=ar_steps, num_past_forcing_steps=1, num_future_forcing_steps=1))
+        fit, n = scored(forecast_windows(ds, calibrate_on, ar_steps, forcing=forcing))
         scale = calibration(fit)
         out["calibration"] = {"split": calibrate_on, "samples": n,
                               "factor": {name: {str(k + 1): float(c) for k, c in enumerate(scale[:, j])} for j, name in enumerate(names)}}
@@ -129,7 +129,7 @@ def main() -> None:
     p.add_argument("--region", choices=("gulf", "interior"), default="gulf")
     p.add_argument("--calibrate-on", default=None, help="fit sigma's per-channel, per-lead factor on this split (val)")
     a = p.parse_args()
-    r = evaluate(a.config, a.ckpt, a.split, a.ar_steps, a.limit, a.region, a.calibrate_on)
+    r = evaluate(a.config, a.ckpt, a.split, a.ar_steps, a.limit, a.region, a.calibrate_on, forcing=Forcing.ORACLE)
     a.out.write_text(json.dumps(r, indent=1))
     for name in (*LEVEL_VARS, "ssh"):
         row = " ".join(f"{lead}d {s['spread_skill']:.2f}/{s['cover1']:.2f}" for lead, s in r["fields"][name].items())
