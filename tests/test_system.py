@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("gom_da", reason="RCC-only: gom_da comes from the gom-da-workspace checkout")
+
 from hycom_emulator.system import SystemConfig, fingerprint
 
 CONFIG = Path(__file__).parents[1] / "configs/systems/abozec_054.toml"

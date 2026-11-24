@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytest.importorskip("gom_da", reason="RCC-only: gom_da comes from the gom-da-workspace checkout")
+
 from hycom_emulator.background import grid_of
 from hycom_emulator.build_store import build as build_store
 from hycom_emulator.forcing import HourlyField, build

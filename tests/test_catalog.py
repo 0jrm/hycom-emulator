@@ -3,6 +3,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("gom_da", reason="RCC-only: gom_da comes from the gom-da-workspace checkout")
+
 from hycom_emulator.catalog import ROLES, cycles, index, unreadable_dirs
 from hycom_emulator.system import SystemConfig
 
