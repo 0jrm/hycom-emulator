@@ -13,7 +13,10 @@ RCC_ONLY_MODULES = frozenset({"background", "build_store", "catalog", "forcing",
 
 
 def load_time_imports(module: str) -> list[tuple[str, int]]:
-    tree = ast.parse((PACKAGE / f"{module}.py").read_text())
+    return load_time_imports_of(ast.parse((PACKAGE / f"{module}.py").read_text()))
+
+
+def load_time_imports_of(tree: ast.Module) -> list[tuple[str, int]]:
     found = []
     for node in tree.body:
         if isinstance(node, ast.Import):
@@ -60,6 +63,25 @@ def test_only_declared_modules_need_rcc_packages_at_import():
         f"or add {m} to RCC_ONLY_MODULES if it never runs there."
         for m in stray
     )
+
+
+def test_tests_of_rcc_only_modules_skip_without_gom_da():
+    """CI has no gom_da: a test file that loads an RCC-only module must skip before it, not fail collection."""
+    bound = set(rcc_bound()) | {"gom_da"}
+    unguarded = []
+    for path in sorted((ROOT / "tests").glob("test_*.py")):
+        text = path.read_text()
+        for name, line in load_time_imports_of(ast.parse(text)):
+            top, _, rest = name.partition(".")
+            if top == "gom_da" or (top == "hycom_emulator" and rest.split(".")[0] in bound):
+                guard = text.find('pytest.importorskip("gom_da"')
+                if guard == -1 or text[:guard].count("\n") + 1 > line:
+                    unguarded.append(
+                        f"tests/{path.name}:{line} loads {name}, which needs gom_da; put "
+                        f'pytest.importorskip("gom_da", reason=...) above it so CI skips the file.'
+                    )
+                break
+    assert not unguarded, "\n".join(unguarded)
 
 
 def test_skynet_scripts_run_no_rcc_only_module():

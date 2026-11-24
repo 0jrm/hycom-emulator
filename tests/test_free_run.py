@@ -7,6 +7,8 @@ import numpy as np
 import pytest
 import xarray as xr
 
+pytest.importorskip("gom_da", reason="RCC-only: gom_da comes from the gom-da-workspace checkout")
+
 from hycom_emulator.build_store import build
 from hycom_emulator.system import SystemConfig, fingerprint
 
