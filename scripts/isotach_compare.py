@@ -30,7 +30,7 @@ from hycom_emulator.isotach import (
     to_grid,
 )
 
-SPLITS = {"val": ("2025-08-06", "2025-08-15"), "test": ("2025-08-21", "2025-09-01")}  # scripts/skynet/train_b00.sh
+SPLITS = {"val": ("2025-08-06", "2025-08-15"), "test": ("2025-08-21", "2025-09-01")}
 METRICS = ("hausdorff_km", "mean_km", "p95_km")
 
 

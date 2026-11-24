@@ -188,7 +188,7 @@ class Section:
         self.blank = grid.blank[self.gi]
         z = np.concatenate([np.zeros((self.gi.size, 1)), np.cumsum(true[self.gi][:, _layers(names, "thknss")] / ONEM, axis=1)], axis=1)
         edges = np.concatenate([[coord[0] - (coord[1] - coord[0]) / 2], (coord[1:] + coord[:-1]) / 2, [coord[-1] + (coord[-1] - coord[-2]) / 2]])
-        self.ze = np.concatenate([z[:1], (z[1:] + z[:-1]) / 2, z[-1:]])  # interface depths at the column edges
+        self.ze = np.concatenate([z[:1], (z[1:] + z[:-1]) / 2, z[-1:]])
         self.X = np.broadcast_to(edges[:, None], self.ze.shape)
 
     def values(self, x, var):

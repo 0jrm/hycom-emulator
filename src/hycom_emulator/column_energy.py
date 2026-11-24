@@ -57,9 +57,6 @@ SPLITS = {
 OBSERVED = ("temp_0m", "ssh")
 
 
-# ---------------------------------------------------------------- data
-
-
 @dataclass
 class Source:
     state: np.ndarray  # (days, grid, features), raw units; memmap for a pack
@@ -125,9 +122,6 @@ def sample_columns(src: Source, dates: str, per_day: int, seed: int) -> tuple[np
     return np.concatenate(vals), np.concatenate(days)
 
 
-# ---------------------------------------------------------------- discretization
-
-
 def fit_edges(vals: np.ndarray, q: int) -> np.ndarray:
     """(cells, q - 1) interior quantile edges."""
     return np.quantile(vals, np.linspace(0, 1, q + 1)[1:-1], axis=0).T.astype(np.float32)
@@ -150,9 +144,6 @@ def bin_medians(vals: np.ndarray, bins: np.ndarray, q: int) -> np.ndarray:
         ok = ~np.isnan(med[i])
         med[i] = np.interp(np.arange(q), np.flatnonzero(ok), med[i, ok])
     return med
-
-
-# ---------------------------------------------------------------- energy
 
 
 class ColumnEnergy(torch.nn.Module):
@@ -212,7 +203,7 @@ def train_energy(bins: np.ndarray, q: int, season: np.ndarray | None = None, ste
         opt.zero_grad()
         loss.backward()
         opt.step()
-        with torch.no_grad():  # prox of lr * l1 * |W|_1
+        with torch.no_grad():
             model.W.copy_(torch.sign(model.W) * (model.W.abs() - lr * l1).clamp_min(0))
         if step % log_every == 0 or step == steps:
             with torch.no_grad():
@@ -330,9 +321,6 @@ def gibbs(model: ColumnEnergy, x0: torch.Tensor, clamp: torch.Tensor, season: to
     return torch.stack(draws, 1).reshape(x0.shape[0], chains * keep, n)
 
 
-# ---------------------------------------------------------------- baselines and scores
-
-
 def gaussian_features(vals: np.ndarray, season: np.ndarray, cells: list[str]) -> np.ndarray:
     obs = vals[:, [cells.index("ssh"), cells.index("temp_0m")]]
     return np.concatenate([np.ones((len(vals), 1)), obs, season], 1).astype(np.float64)
@@ -351,7 +339,7 @@ def fair_crps(ens: np.ndarray, y: np.ndarray) -> np.ndarray:
     m = ens.shape[1]
     xs = np.sort(ens, 1)
     w = (2 * np.arange(1, m + 1) - m - 1)[None, :, None]
-    pair = 2 * (w * xs).sum(1)  # sum over ordered pairs of |X_i - X_j|
+    pair = 2 * (w * xs).sum(1)
     return np.abs(ens - y[:, None]).mean(1) - pair / (2 * m * (m - 1))
 
 
@@ -373,9 +361,6 @@ def ens_scores(ens: np.ndarray, y: np.ndarray) -> dict:
 def gauss_scores(mu: np.ndarray, sd: np.ndarray, y: np.ndarray) -> dict:
     rmse = np.sqrt(((mu - y) ** 2).mean(0))
     return {"rmse": rmse, "crps": gaussian_crps(mu, sd, y).mean(0), "ratio": np.sqrt((sd ** 2).mean(0)) / rmse}
-
-
-# ---------------------------------------------------------------- CLI
 
 
 def fit(args) -> None:

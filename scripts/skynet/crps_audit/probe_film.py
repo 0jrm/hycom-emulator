@@ -25,7 +25,6 @@ for path in ckpts:
             w = sd[k].float()
             h = w.shape[0] // 2
             scale, shift = w[:h], w[h:]
-            # per-output std of W z for z ~ N(0, I) is the row norm; report the rms over outputs
             print(f"  {k}: |W|={w.norm():.4f} rms scale={scale.norm(dim=1).pow(2).mean().sqrt():.4f} "
                   f"max scale row={scale.norm(dim=1).max():.4f} rms shift={shift.norm(dim=1).pow(2).mean().sqrt():.4f}")
     ref = [k for k in sd if "processor" in k and k.endswith("weight") and sd[k].ndim == 2][:2]

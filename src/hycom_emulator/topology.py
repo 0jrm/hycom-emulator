@@ -19,7 +19,7 @@ from scipy import ndimage
 
 try:
     from numba import njit
-except ImportError:  # the union-find is the same Python either way
+except ImportError:
     def njit(**_):
         return lambda f: f
 
@@ -35,8 +35,6 @@ NEIGHBOUR_OFFSETS = {
 }
 
 
-# ------------------------------------------------------------------------------------------- boundary.py
-
 def open_boundary_cells(valid_mask: np.ndarray, connectivity: int = 4) -> np.ndarray:
     """Valid cells with a neighbour that is invalid or off-grid."""
     padded = np.pad(np.asarray(valid_mask, bool), 1, constant_values=False)
@@ -46,8 +44,6 @@ def open_boundary_cells(valid_mask: np.ndarray, connectivity: int = 4) -> np.nda
         touches |= ~padded[1 + dr:1 + dr + n_rows, 1 + dc:1 + dc + n_cols]
     return valid_mask & touches
 
-
-# ----------------------------------------------------------------------------------------- cubical_h0.py
 
 @njit(cache=True)
 def _find(union_parent, node):
@@ -196,8 +192,6 @@ def diagram(p: Pairs, polarity: str, floor: float) -> np.ndarray:
     return d[d[:, 0] - d[:, 1] >= floor]
 
 
-# ---------------------------------------------------------------------------------------- merge_tree.py
-
 def _ancestor_chain(forest: MergeForest, extremum_id: int) -> list[int]:
     chain = [int(extremum_id)]
     while chain[-1] >= 0 and forest.parent[chain[-1]] != ESSENTIAL_PARENT:
@@ -240,8 +234,6 @@ def level_at_rank(values: np.ndarray, ranked_cells: np.ndarray, rank: int) -> fl
     return float(np.ravel(values)[ranked_cells[rank]])
 
 
-# ---------------------------------------------------------------------------------------- null_model.py
-
 EARTH_RADIUS_KM = 6371.0
 
 
@@ -269,8 +261,6 @@ def spatial_surrogates(err: np.ndarray, latitude, longitude, length_km: float, n
         out[k] = np.fft.ifft2(np.fft.fft2(rng.standard_normal(shape)) * spectrum).real[py:py + ny, px:px + nx]
     return out * np.asarray(err)
 
-
-# -------------------------------------------------------------------------------------- loop_current.py
 
 SEED_BOX = {"west": -86.6, "east": -85.2, "south": 21.5, "north": 22.0}
 LC_CONTOUR = 0.17

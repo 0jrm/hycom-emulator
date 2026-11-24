@@ -35,7 +35,7 @@ def persistence_losses(config_path: str, split: str, ar_steps: int, loss_name: s
     per_var_std = diff_std / torch.sqrt(w)
     mask = torch.tensor(~ds.boundary_mask.values.astype(bool))
     loss = {"wmse": metrics.wmse, "hycom_wmse": hycom_wmse}[loss_name]
-    data = forecast_windows(ds, split, ar_steps, forcing=Forcing.ORACLE)  # persistence reads no forcing; any mode scores the same
+    data = forecast_windows(ds, split, ar_steps, forcing=Forcing.ORACLE)
     idx = np.arange(len(data)) if n is None else np.linspace(0, len(data) - 1, min(n, len(data))).astype(int)
     rows = []
     for i in idx:

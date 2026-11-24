@@ -37,12 +37,11 @@ from neural_lam.models import MODELS
 from neural_lam.models.step_predictors.graph.graph_lam import GraphLAM
 
 ONEM = 9806.0  # Pa of layer thickness per metre
-GRADIENT_WEIGHT = 3.59  # gradient term 1/10 of the loss at emu-b00-053-phys2-reweight over all 115 train samples (base 0.358, raw 0.0111)
-DENSITY_WEIGHT, STABILITY_WEIGHT = 4.00e-4, 3.90e-2  # 1/9 of base 0.427 each: sigma2 term 118.6, stability 1.22 at weight 1
+GRADIENT_WEIGHT = 3.59
+DENSITY_WEIGHT, STABILITY_WEIGHT = 4.00e-4, 3.90e-2
 MASSLESS = 1e-3 * ONEM  # Pa: a layer thinner than 1 mm holds no mass
 RHO_REF = 0.01  # kg/m3: density error that costs as much as one standardized change
 LAYERED = ("temp", "salin", "thknss", "u", "v")
-# hycom_wmse's gradient term: T and S of the top five layers, and SSH.
 GRADIENT_CHANNELS = tuple(f"{v}_k{k:02d}" for v in ("temp", "salin") for k in range(1, 6)) + ("srfhgt",)
 WEIGHTED_BY_THICKNESS = ("temp", "salin", "u", "v")
 # HYCOM's 7-term sigma-2 polynomial (stmt_fns.h, Brydon & Sun fit): sigma2(T, S) in kg/m3 - 1000.
@@ -53,23 +52,18 @@ REWEIGHT = {"loss": "hycom_wmse", "group_weights": True,
 ARMS = {
     "control": {"model": "graph_lam", "loss": "wmse"},
     "reweight": REWEIGHT | {"model": "graph_lam"},
-    # Penalty weights: each penalty is 1/9 of the base loss (one variable group's share) at E1's
-    # checkpoint over all 115 train samples (explore-physcheck/preflight3, 2026-10-03).
     "penalties": REWEIGHT | {"model": "graph_lam",
                              "physics": {"thickness_weighted": True, "density": DENSITY_WEIGHT, "stability": STABILITY_WEIGHT}},
-    # convnet: option A (full-resolution conv blocks) with and without channel attention; option B (stride-4 level).
     "conv": REWEIGHT | {"model": "conv_graph_lam", "conv": {"blocks": 3, "channel_attention": True, "stride": 1}},
     "conv_noca": REWEIGHT | {"model": "conv_graph_lam", "conv": {"blocks": 3, "channel_attention": False, "stride": 1}},
     "unet": REWEIGHT | {"model": "conv_graph_lam", "conv": {"blocks": 3, "channel_attention": True, "stride": 4},
                         "graph": "multiscale_s4"},
-    # Sharpness arms (card emu-b00-053-sharp): the gradient term alone, on option A, and a 3-cell mesh.
     "grad": REWEIGHT | {"model": "graph_lam", "physics": REWEIGHT["physics"] | {"gradient": GRADIENT_WEIGHT}},
     "conv_grad": REWEIGHT | {"model": "conv_graph_lam", "physics": REWEIGHT["physics"] | {"gradient": GRADIENT_WEIGHT},
                              "conv": {"blocks": 3, "channel_attention": True, "stride": 1}},
     "mesh3": REWEIGHT | {"model": "graph_lam", "graph": "mesh3"},
     "conv_norm": REWEIGHT | {"model": "conv_graph_lam",
                              "conv": {"blocks": 3, "channel_attention": True, "stride": 1, "norm": True}},
-    # Pre-norm arms with neural-lam's wmse (card emu-b00-e2-scratch).
     "conv_norm_wmse": {"model": "conv_graph_lam", "loss": "wmse",
                        "conv": {"blocks": 3, "channel_attention": True, "stride": 1, "norm": True}},
     "unet_norm_wmse": {"model": "conv_graph_lam", "loss": "wmse", "graph": "multiscale_s4",
@@ -170,7 +164,7 @@ def hycom_wmse(pred, target, pred_std, mask=None, average_grid=True, sum_vars=Tr
     entry = (pred - target) ** 2 / pred_std**2
     phys = lambda x, v: x[..., c.cols[v]] * c.std[c.cols[v]] + c.mean[c.cols[v]]  # noqa: E731
     dp_true = phys(target, "thknss").clamp_min(0.0)
-    rel = dp_true / dp_true.mean(-1, keepdim=True).clamp_min(1e-6)  # 0 for empty layers, mean 1 per column
+    rel = dp_true / dp_true.mean(-1, keepdim=True).clamp_min(1e-6)
     if c.settings["thickness_weighted"]:
         w = torch.ones_like(entry)
         for v in WEIGHTED_BY_THICKNESS:

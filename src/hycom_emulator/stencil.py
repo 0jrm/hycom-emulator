@@ -213,7 +213,7 @@ def ridge(gs: GramSet, levels: np.ndarray, lam: float, drop: dict[int, int] | No
             continue
         A = G / n
         pen = torch.full((gs.P,), lam, dtype=torch.float64, device=G.device)
-        if free_const:  # within (fixed-effects) Grams have a zero constant column: penalise it there
+        if free_const:
             pen[-1] = 0.0
         A = A + torch.diag(pen)
         chans = np.flatnonzero(levels == lev)
@@ -319,8 +319,6 @@ def describe(path: Path) -> str:
                        "b": None if d["b"] is None else list(d["b"].shape), **d["info"]}, indent=1)
 
 
-# --- fitting ------------------------------------------------------------------------------------------------------
-
 def _days(times: np.ndarray, start: str, end: str, every: int) -> list[int]:
     t = times.astype("datetime64[D]")
     ok = np.flatnonzero((t >= np.datetime64(start)) & (t <= np.datetime64(end)))
@@ -344,7 +342,6 @@ def accumulate(config: Path, out: Path, start: str, end: str, every: int, k: int
     rows = rows_by_class(lay, device=device)
     from hycom_emulator.datastore import kept_windows
 
-    # sample i holds rows i, i + 1 (init) and i + 2 (target); drop windows that straddle a source change
     tt = ds.get_dataarray("state", "train").time.values
     times = tt[2:2 + len(data)]
     kept = set(kept_windows(tt, 3, len(data)).tolist())
@@ -389,7 +386,7 @@ def fit(train: Path, held: Path, out_dir: Path, lambdas: list[float], device: st
     out_dir.mkdir(parents=True, exist_ok=True)
     for lam in lambdas:
         W = ridge(tr, levels, lam)
-        if save_all:  # every lambda's shared stencil, for selection by held-out free runs
+        if save_all:
             save_module(out_dir / f"stencil-shared-l{lam:g}.pt", W, None, tuple(tr.meta["shape"]), tr.meta["k"], tr.meta["forcing"],
                         {"lambda": lam, "arm": "shared"}, tr.meta.get("nlev", 0))
         mse = heldout_mse(ho, W, levels)
@@ -405,13 +402,13 @@ def fit(train: Path, held: Path, out_dir: Path, lambdas: list[float], device: st
     res = {"lambdas": [{k_: v for k_, v in r.items() if k_ != "mse"} for r in table], "best": best["lambda"],
            "heldout_mse_per_channel": best["mse"], "names": tr.meta["names"]}
     if tr.per_cell:
-        rows = _rows_from_meta(tr, device)  # the rows accumulate used: every non-edge cell of each class
+        rows = _rows_from_meta(tr, device)
         Wb = ridge(tr.within(rows), levels, best["lambda"], free_const=False)
         d = float(tr.days)
         b = (tr.S_y / d - (tr.S_phi / d) @ Wb.T)  # (grid, C): each cell's mean target minus the fitted mean
         valid = torch.as_tensor(_valid_from_meta(tr), device=device)
         b = torch.where(valid, b, torch.zeros_like(b))
-        Wb[:, -1] = 0.0  # the per-cell bias carries the constant
+        Wb[:, -1] = 0.0
         save_module(out_dir / "stencil-bias.pt", Wb, b, shape, k, frc, {**info, "arm": "bias"}, nlev)
         res["bias_abs_mean"] = float(b.abs().mean())
     (out_dir / "fit.json").write_text(json.dumps(res, indent=1))

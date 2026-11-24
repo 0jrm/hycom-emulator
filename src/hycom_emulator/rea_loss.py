@@ -27,7 +27,7 @@ from hycom_emulator.conservation import functionals
 from hycom_emulator.evaluate_rea import LEVEL_VARS, cell_area, regions
 from hycom_emulator.physics import sigma2
 
-EPS = 1e-20  # keeps sqrt(Px * Py) differentiable where a band has no power; computed in float64
+EPS = 1e-20
 INVERSION_SCALE = 0.01  # kg/m3: a downward sigma2 drop of this size on one level pair costs 1
 QUANTITIES = ("ssh_mean", "ubaro_mean", "vbaro_mean", "temp_mean", "salin_mean", "u_mean", "v_mean")
 

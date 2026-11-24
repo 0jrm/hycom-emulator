@@ -168,7 +168,7 @@ def score(config: Path, energy: Path, band_json: Path, out: Path, models: dict[s
         for b0 in range(0, len(todo), batch):
             for lead, pos, step in rr.unroll(m.module, m.window, m.times, todo[b0:b0 + batch], horizon):
                 srcs = {name: z(step.pred)}
-                if i == 0:  # the references once, from the first model's pass over the same starts
+                if i == 0:
                     t = z(step.truth)
                     srcs["truth"] = t
                     for s in blurs:
