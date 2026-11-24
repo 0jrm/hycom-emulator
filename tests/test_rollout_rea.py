@@ -6,6 +6,7 @@ import torch
 from scipy import ndimage
 
 from hycom_emulator.evaluate_rea import FrontGrid, level_weights, point_weights
+from hycom_emulator.forcing_mode import Forcing, Windows
 from hycom_emulator.operators import op_grid
 from hycom_emulator.rollout_rea import (
     BANDS, STATS, Start, Step, _images, band_variance, done, finalize, geometry, loop_current, max_horizon, plane, rollout_stats,
@@ -112,7 +113,7 @@ def record():
     times = np.arange(np.datetime64("2022-01-01T12"), np.datetime64("2022-01-31T12"), np.timedelta64(1, "D")).astype("datetime64[ns]")
     state = torch.tensor(rng.normal(size=(T, G, F)), dtype=torch.float32)
     forcing = torch.tensor(rng.normal(size=(T, G, 2)), dtype=torch.float32)
-    return FakeModule(rng), lambda n: FakeWindow(state, forcing, times, n), times, state
+    return FakeModule(rng), lambda n: Windows(FakeWindow(state, forcing, times, n), forcing=Forcing.ORACLE), times, state
 
 
 def _collect(module, window, times, starts, chunk):
@@ -280,7 +281,8 @@ def test_parts_are_skipped_on_rerun_and_concatenated_in_order(tmp_path):
     write_part(parts, _part(["2022-01-01"], [7], 7))
     assert sorted(p.name for p in parts.iterdir()) == ["2022-01-01_1.nc", "2022-03-01_2.nc"]
     have = done(parts)
-    assert have == {np.datetime64("2022-03-01"): (5, "abc"), np.datetime64("2001-02-01"): (3, "abc"), np.datetime64("2022-01-01"): (7, "abc")}
+    assert have == {np.datetime64("2022-03-01"): (5, "abc", "ORACLE"), np.datetime64("2001-02-01"): (3, "abc", "ORACLE"),
+                    np.datetime64("2022-01-01"): (7, "abc", "ORACLE")}
     ds = finalize(parts, tmp_path / "stats.nc")
     assert [str(t)[:10] for t in ds.start.values] == ["2001-02-01", "2022-01-01", "2022-03-01"]
     assert ds.sizes["lead"] == 7 and list(ds.in_sample.values) == [True, False, False] and list(ds.horizon.values) == [3, 7, 5]
@@ -323,12 +325,12 @@ def test_fields_keep_raw_model_truth_and_start_per_lead(record, tmp_path, monkey
     lon, lat = np.linspace(-90, -85, G), np.linspace(22, 26, G)
     static = xr.DataArray(np.stack([lon, lat, np.full(G, 1000.0)], 1), dims=("grid_index", "static_feature"),
                           coords={"static_feature": ["lon", "lat", "depth"]})
-    model = rr.Model(module, window, times, geo, xr.Dataset({"static": static}), (5, 4), None)
-    monkeypatch.setattr(rr, "load_model", lambda c, k: model)
+    model = rr.Model(module, Forcing.ORACLE, window, times, geo, xr.Dataset({"static": static}), (5, 4), None)
+    monkeypatch.setattr(rr, "load_model", lambda c, k, forcing: model)
     monkeypatch.setattr(rr, "release_pack_pages", lambda d: None)
     monkeypatch.setattr(rr, "_md5", lambda p: "md5")
     starts = ["2022-01-03", "2022-01-20", "2022-01-11"]
-    ds = rr.fields(tmp_path / "c", tmp_path / "k", tmp_path / "f.nc", starts, 20, 4, 2, ("ssh", "u_0m"))
+    ds = rr.fields(tmp_path / "c", tmp_path / "k", tmp_path / "f.nc", starts, 20, 4, 2, ("ssh", "u_0m"), forcing=Forcing.ORACLE)
     assert list(ds.start.values.astype("datetime64[D]").astype(str)) == sorted(starts)
     assert list(ds.horizon.values) == [20, 18, 9]
     ref = _collect(module, window, times, start_set(times.astype("datetime64[D]"), 20, starts), 4)
@@ -343,3 +345,25 @@ def test_fields_keep_raw_model_truth_and_start_per_lead(record, tmp_path, monkey
         assert np.allclose(ds.ssh_start.values[i], x0[:, j].numpy())
         assert np.isnan(ds.ssh_model.values[i, int(ds.horizon[i]):]).all()
     assert ds.attrs["nx"] == 5 and ds.attrs["ny"] == 4 and (tmp_path / "f.nc").exists()
+
+
+def test_issue_time_persistence_holds_every_chunk_at_the_run_start(record):
+    module, _, times, _ = record
+    rows = torch.arange(len(times), dtype=torch.float32)
+    state = (100 * rows[:, None, None]).expand(len(times), G, F).contiguous()
+    forcing = (100 * rows[:, None, None]).expand(len(times), G, 2).contiguous()
+    window = lambda n: Windows(FakeWindow(state, forcing, times, n), forcing=Forcing.ISSUE_TIME_PERSISTENCE)  # noqa: E731
+    seen = []
+    transfer = module.on_after_batch_transfer
+    module.on_after_batch_transfer = lambda batch, i: (seen.append(batch), transfer(batch, i))[1]
+    for s in start_set(times.astype("datetime64[D]"), 20, ["2022-01-03", "2022-01-11"]):
+        seen.clear()
+        single = _collect(module, window, times, [s], 20)
+        chunked = _collect(module, window, times, [s], 4)
+        assert len(seen) == 1 + -(-s.horizon // 4)
+        for i, (carry, boundary, held, _) in enumerate(seen):
+            assert boundary.max() <= 100 * s.index and held.max() <= 100 * s.index, (s.date, i)
+            if i < 2:
+                assert carry.max() <= 100 * s.index
+        for k in single:
+            assert torch.allclose(single[k][0], chunked[k][0], atol=1e-3) and torch.equal(single[k][1], chunked[k][1])

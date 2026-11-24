@@ -377,11 +377,11 @@ def probe(argv: list[str]) -> int:
     import neural_lam.train_model as tm
     from neural_lam.config import load_config_and_datastore
     from neural_lam.models import MODELS
-    from neural_lam.weather_dataset import WeatherDataset
 
     import hycom_emulator.convnet  # noqa: F401  registers our models
     import hycom_emulator.rcan  # noqa: F401  registers rcan_graph_lam
     import hycom_emulator.datastore  # noqa: F401  registers the hycom kind
+    from hycom_emulator.forcing_mode import oracle_training_data
 
     opts, rest = split_args(argv)
     p = argparse.ArgumentParser(prog="hycom_emulator.rea_train probe", allow_abbrev=False)
@@ -420,8 +420,7 @@ def probe(argv: list[str]) -> int:
         module.load_state_dict(ckpt["state_dict"])
     module = module.to(device).train()
     opt = module.configure_optimizers()
-    data = WeatherDataset(ds, split="train", ar_steps=a.ar_steps_train, num_past_forcing_steps=args.num_past_forcing_steps,
-                          num_future_forcing_steps=args.num_future_forcing_steps)
+    data = oracle_training_data(ds, "train", a.ar_steps_train, args.num_past_forcing_steps, args.num_future_forcing_steps)
     gen = None if a.seed is None else torch.Generator().manual_seed(a.seed)
     loader = torch.utils.data.DataLoader(data, batch_size=a.batch_size, shuffle=True, num_workers=a.num_workers, generator=gen,
                                          multiprocessing_context="fork" if a.num_workers else None, pin_memory=device.type == "cuda")

@@ -9,8 +9,8 @@
 
 The model unrolls in chunks of --chunk days. Each chunk is one neural-lam window (WeatherDataset over the whole
 record: the config's train split is widened in memory) whose two initial states are replaced by the model's last
-two predictions, so no truth enters the interior after t0. ARForecaster still overwrites the boundary band with
-truth every step, and the forcing is the true daily wind.
+two predictions, so no truth enters the interior after t0. Under Forcing.ORACLE, the only mode the command line runs,
+ARForecaster overwrites the boundary band with truth every step and the forcing is the true daily wind.
 
 Default starts: every day 2022-01-01..2024-08-30 (out of sample) and every 30 days 2001-02-01..2021-12-01 (in
 sample), each run for --horizon days or up to the end of the record. `run` writes out/parts/<first-start>_<n>.nc per
@@ -45,10 +45,15 @@ from scipy import ndimage
 import hycom_emulator.ensemble  # noqa: F401  registers crps_graph_lam, so a free run can load an ensemble checkpoint
 from hycom_emulator import operators as op
 from hycom_emulator.evaluate_rea import LEVEL_VARS, FrontGrid, front_grid, level_weights, point_weights, speed_0m
+from hycom_emulator.forcing_mode import Forcing, Windows, forecast_windows
 from hycom_emulator.isotach import front_distance
 
-LABEL = ("regional free run: true boundary band (neural-lam overwrites it with truth every step) and true daily wind; "
-         "no truth enters the interior after t0")
+LABEL = {
+    Forcing.ORACLE: "regional free run: true boundary band (neural-lam overwrites it with truth every step) and true daily wind; "
+                    "no truth enters the interior after t0",
+    Forcing.ISSUE_TIME_PERSISTENCE: "regional free run: boundary band and daily wind held at their t0 values; "
+                                    "no truth enters the model after t0",
+}
 REGION = ("Gulf of Mexico (static gulf) ocean points outside the boundary band; area weight cos^2(lat), each channel "
           "on its real points (level_ocean); T, S, u, v as columns to 2000 m weighted by depth interval")
 FIELDS = (*LEVEL_VARS, "ssh")
@@ -405,7 +410,7 @@ def _pad(t, n: int):
 
 def unroll(module, window: Callable, times: np.ndarray, starts: list[Start], chunk: int):
     """Yield (lead, positions in starts, Step) for every lead of every run, lead by lead. window(n) is a
-    WeatherDataset with ar_steps=n over the whole record; times its row times (datetime64[ns])."""
+    forcing_mode.Windows with ar_steps=n over the whole record; times its row times (datetime64[ns])."""
     alive = list(range(len(starts)))
     carry = None
     for c in range(-(-max(s.horizon for s in starts) // chunk)):
@@ -416,18 +421,21 @@ def unroll(module, window: Callable, times: np.ndarray, starts: list[Start], chu
         samples = []
         for b, k in zip(alive, steps):
             s = starts[b]
-            sample = window(k)[window_index(s.index, c, chunk)]
+            sample = window(k).at(window_index(s.index, c, chunk), window_index(s.index, 0, chunk))
             r = s.index + c * chunk + 1
-            assert (sample[3].numpy() == times[r:r + k].astype("datetime64[ns]").astype(np.int64)).all(), f"{s.date} chunk {c}"
+            assert (sample.times.numpy() == times[r:r + k].astype("datetime64[ns]").astype(np.int64)).all(), f"{s.date} chunk {c}"
             samples.append(sample)
-        target, forcing, ttimes = (torch.stack([_pad(x[i], n) for x in samples]).to(module.device) for i in (1, 2, 3))
+        target, forcing, ttimes = (torch.stack([_pad(getattr(x, f), n) for x in samples]).to(module.device)
+                                   for f in ("truth", "forcing", "times"))
+        same = all(x.boundary is x.truth for x in samples)  # ORACLE: one tensor, stacked once
+        boundary = target if same else torch.stack([_pad(x.boundary, n) for x in samples]).to(module.device)
         if carry is None:
-            carry = torch.stack([x[0] for x in samples]).to(module.device)
+            carry = torch.stack([x.init for x in samples]).to(module.device)
             x0 = truth_last = carry[:, 1]
         else:
             carry, x0, truth_last = carry[keep], x0[keep], truth_last[keep]
         with torch.no_grad():
-            batch = module.on_after_batch_transfer((carry, target, forcing, ttimes), 0)
+            batch = module.on_after_batch_transfer((carry, boundary, forcing, ttimes), 0)
             pred = module.common_step(batch)[0] * module.state_std + module.state_mean
         for l in range(n):
             rows = torch.tensor([i for i, k in enumerate(steps) if l < k], device=module.device)
@@ -469,13 +477,14 @@ def write_part(parts: Path, ds: xr.Dataset) -> Path:
     return path
 
 
-def done(parts: Path) -> dict[np.datetime64, tuple[int, str]]:
-    """Start date -> (horizon, checkpoint md5) of every start already in parts."""
+def done(parts: Path) -> dict[np.datetime64, tuple[int, str, str]]:
+    """Start date -> (horizon, checkpoint md5, forcing mode) of every start already in parts. Parts written before
+    the forcing attribute existed were all ORACLE runs."""
     out = {}
     for p in sorted(parts.glob("*.nc")):
         with xr.open_dataset(p) as d:
             for t, h in zip(d.start.values.astype("datetime64[D]"), d.horizon.values):
-                out[t] = (int(h), d.attrs["checkpoint_md5"])
+                out[t] = (int(h), d.attrs["checkpoint_md5"], d.attrs.get("forcing_mode", Forcing.ORACLE.name))
     return out
 
 
@@ -490,7 +499,8 @@ def finalize(parts: Path, out: Path) -> xr.Dataset:
 @dataclass
 class Model:
     module: object
-    window: Callable
+    forcing: Forcing
+    window: Callable[[int], Windows]
     times: np.ndarray  # row times, datetime64[ns]
     geo: Geometry
     meta: xr.Dataset
@@ -498,12 +508,10 @@ class Model:
     datastore: object
 
 
-def load_model(config: Path, ckpt: Path) -> Model:
-    from neural_lam.weather_dataset import WeatherDataset
-
+def load_model(config: Path, ckpt: Path, *, forcing: Forcing) -> Model:
     from hycom_emulator.evaluate_b00 import load
 
-    ds, _, module = load(config, ckpt, "train", 1)
+    ds, _, module = load(config, ckpt, "train", 1, forcing=forcing)
     ds.config["splits"]["train"] = ["1900-01-01", "2200-12-31"]
     meta = xr.open_zarr(Path(ds.config["zarr"]) / "meta.zarr", consolidated=True)
     names = [str(n) for n in meta.state_feature.values]
@@ -523,8 +531,8 @@ def load_model(config: Path, ckpt: Path) -> Model:
                      img(region), device=module.device)
     geo = replace(geometry(names, area, region, level_ocean, levels, module.device), plane=pl, ops=ops,
                   front=front_grid(meta, names))
-    window = functools.cache(lambda n: WeatherDataset(ds, split="train", ar_steps=n, num_past_forcing_steps=1, num_future_forcing_steps=1))
-    return Model(module, window, ds.get_dataarray("state", "train").time.values, geo, meta, shape, ds)
+    window = functools.cache(lambda n: forecast_windows(ds, "train", n, forcing=forcing))
+    return Model(module, forcing, window, ds.get_dataarray("state", "train").time.values, geo, meta, shape, ds)
 
 
 def release_pack_pages(datastore) -> None:
@@ -560,17 +568,17 @@ def _gpu_gib() -> float:
 
 
 def run(config: Path, ckpt: Path, out: Path, horizon: int, chunk: int, batch: int, starts: list[str] | None,
-        stride: int, limit: int | None) -> None:
-    m = load_model(config, ckpt)
+        stride: int, limit: int | None, *, forcing: Forcing) -> None:
+    m = load_model(config, ckpt, forcing=forcing)
     parts = out / "parts"
     parts.mkdir(parents=True, exist_ok=True)
     md5 = _md5(ckpt)
     todo = start_set(m.times.astype("datetime64[D]"), horizon, starts, stride, limit)
     have = done(parts)
-    if clash := [str(s.date) for s in todo if s.date in have and have[s.date] != (s.horizon, md5)]:
-        raise ValueError(f"{parts} holds other runs (horizon or checkpoint differ) for {', '.join(clash[:5])}; use a new out_dir")
+    if clash := [str(s.date) for s in todo if s.date in have and have[s.date] != (s.horizon, md5, forcing.name)]:
+        raise ValueError(f"{parts} holds other runs (horizon, checkpoint or forcing differ) for {', '.join(clash[:5])}; use a new out_dir")
     todo = [s for s in todo if s.date not in have]
-    attrs = {"label": LABEL, "checkpoint": str(ckpt), "checkpoint_md5": md5, "code_sha": _code_sha(), "region": REGION,
+    attrs = {"label": LABEL[forcing], "forcing_mode": forcing.name, "checkpoint": str(ckpt), "checkpoint_md5": md5, "code_sha": _code_sha(), "region": REGION,
              "chunk": chunk, "max_horizon": horizon, "batch": batch,
              "interpolated_truth_days": " ".join(str(t)[:10] for t in m.times[m.meta.time_filled.values])}
     timing = out / "timing.json"
@@ -601,10 +609,10 @@ def _channel_groups(names: list[str]) -> dict[str, list[int]]:
     return groups
 
 
-def check(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, chunk: int) -> dict:
+def check(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, chunk: int, *, forcing: Forcing) -> dict:
     """Max abs and relative (to the single run's max |value|) differences of raw predictions per field group:
     chunked vs single window, and a repeat of the single window vs itself, the GPU noise floor."""
-    m = load_model(config, ckpt)
+    m = load_model(config, ckpt, forcing=forcing)
     todo = start_set(m.times.astype("datetime64[D]"), horizon, starts)
     groups = _channel_groups(m.geo.names)
     acc = {g: np.zeros(3) for g in groups}
@@ -615,7 +623,7 @@ def check(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, 
             ref = single.pred[..., cols]
             new = [(chunked.pred[..., cols] - ref).abs().max().item(), (repeat.pred[..., cols] - ref).abs().max().item(), ref.abs().max().item()]
             acc[g] = np.maximum(acc[g], new)
-    res = {"label": LABEL, "checkpoint": str(ckpt), "starts": [str(s.date) for s in todo], "horizon": horizon, "chunk": chunk,
+    res = {"label": LABEL[forcing], "forcing_mode": forcing.name, "checkpoint": str(ckpt), "starts": [str(s.date) for s in todo], "horizon": horizon, "chunk": chunk,
            "groups": {g: {"chunked_vs_single": {"max_abs": a[0], "max_rel": a[0] / a[2]},
                           "repeat_vs_single": {"max_abs": a[1], "max_rel": a[1] / a[2]}} for g, a in acc.items()}}
     out.write_text(json.dumps(res, indent=1))
@@ -668,7 +676,7 @@ def figures(stats: Path, out: Path) -> None:
                 ax.legend(fontsize=7)
             for ax in axes.flat[len(rows):]:
                 ax.axis("off")
-            fig.suptitle(f"{name}: median and 10-90% over starts, {span}\n{LABEL}", fontsize=9)
+            fig.suptitle(f"{name}: median and 10-90% over starts, {span}\n{ds.attrs['label']}", fontsize=9)
             fig.tight_layout()
             fig.savefig(out / f"{tag}_{name}.png", dpi=100)
             plt.close(fig)
@@ -688,14 +696,14 @@ def movie_values(x: np.ndarray, groups: list[list[int]]) -> np.ndarray:
 
 
 def movie(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, chunk: int, note: str = "",
-          chans: tuple[str, ...] = ("ssh", "temp_100m")) -> None:
+          chans: tuple[str, ...] = ("ssh", "temp_100m"), *, forcing: Forcing) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib import animation
 
-    m = load_model(config, ckpt)
+    m = load_model(config, ckpt, forcing=forcing)
     out.mkdir(parents=True, exist_ok=True)
     todo = start_set(m.times.astype("datetime64[D]"), horizon, starts)
     groups = [movie_channel(c, m.geo.names) for c in chans]
@@ -731,7 +739,7 @@ def movie(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, 
             for r in range(len(chans)):
                 for c, v in enumerate((mod[l, r], tru[l, r], mod[l, r] - tru[l, r])):
                     meshes[3 * r + c].set_array(grid(v))
-            title.set_text(f"{note + chr(10) if note else ''}start {s.date}  valid {s.date + (l + 1) * DAY}  lead {l + 1} d\n{LABEL}")
+            title.set_text(f"{note + chr(10) if note else ''}start {s.date}  valid {s.date + (l + 1) * DAY}  lead {l + 1} d\n{LABEL[forcing]}")
 
         stem = out / f"rollout_{s.date}"
         writer = animation.FFMpegWriter(fps=10) if use_ffmpeg else animation.PillowWriter(fps=10)
@@ -747,10 +755,10 @@ def movie(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, 
 
 
 def fields(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, chunk: int, batch: int,
-           chans: tuple[str, ...] = ("ssh",)) -> xr.Dataset:
+           chans: tuple[str, ...] = ("ssh",), *, forcing: Forcing) -> xr.Dataset:
     """<c>_model and <c>_truth (start, lead, grid_index) and <c>_start (start, grid_index), float32, NaN past a
     start's horizon, with lon, lat, depth and the scoring region on grid_index; grid_index = ix * ny + iy."""
-    m = load_model(config, ckpt)
+    m = load_model(config, ckpt, forcing=forcing)
     todo = start_set(m.times.astype("datetime64[D]"), horizon, starts)
     cols = [m.geo.names.index(c) for c in chans]
     H, G = max(s.horizon for s in todo), len(m.geo.region)
@@ -776,7 +784,7 @@ def fields(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int,
               "lat": ("grid_index", st("lat")), "depth": ("grid_index", st("depth")),
               "region": ("grid_index", m.geo.region.cpu().numpy())}
     dlon = float(np.median(np.diff(np.unique(np.round(st("lon"), 6)))))
-    attrs = {"label": LABEL, "region_def": REGION, "checkpoint": str(ckpt), "checkpoint_md5": _md5(ckpt), "code_sha": _code_sha(),
+    attrs = {"label": LABEL[forcing], "forcing_mode": forcing.name, "region_def": REGION, "checkpoint": str(ckpt), "checkpoint_md5": _md5(ckpt), "code_sha": _code_sha(),
              "chunk": chunk, "nx": m.shape[0], "ny": m.shape[1], "dlon": dlon,
              "created": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     ds = xr.Dataset(data, coords, attrs).sortby("start")
@@ -813,13 +821,13 @@ def main() -> None:
     q.add_argument("out", type=Path)
     a = p.parse_args()
     if a.cmd == "run":
-        run(a.config, a.ckpt, a.out, a.horizon, a.chunk, a.batch, a.starts, a.stride_days, a.limit)
+        run(a.config, a.ckpt, a.out, a.horizon, a.chunk, a.batch, a.starts, a.stride_days, a.limit, forcing=Forcing.ORACLE)
     elif a.cmd == "check":
-        print(json.dumps(check(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk)["groups"], indent=1))
+        print(json.dumps(check(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk, forcing=Forcing.ORACLE)["groups"], indent=1))
     elif a.cmd == "fields":
-        fields(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk, a.batch, a.channels)
+        fields(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk, a.batch, a.channels, forcing=Forcing.ORACLE)
     elif a.cmd == "movie":
-        movie(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk, a.note, a.channels)
+        movie(a.config, a.ckpt, a.out, a.starts, a.horizon, a.chunk, a.note, a.channels, forcing=Forcing.ORACLE)
     else:
         figures(a.stats, a.out)
 

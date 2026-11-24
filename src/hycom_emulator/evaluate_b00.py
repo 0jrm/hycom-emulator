@@ -23,6 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
+from hycom_emulator.forcing_mode import Forcing, forecast_windows
+
 G = 9.806
 FIELDS = ("temp", "salin", "u", "v", "ssh")
 
@@ -91,14 +93,12 @@ class Accumulator:
         return out
 
 
-def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int, model: str | None = None):
-    """(datastore, WeatherDataset of the split, forecaster module or None). model, a neural-lam MODELS
+def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int, model: str | None = None, *, forcing: Forcing):
+    """(datastore, forcing_mode.Windows of the split, forecaster module or None). model, a neural-lam MODELS
     name, loads the checkpoint's weights into that step predictor instead of the one it was trained
     with: `hycom_graph_lam` applies the thickness projection to a GraphLAM checkpoint at prediction time."""
     import torch
     from neural_lam.config import load_config_and_datastore
-    from neural_lam.weather_dataset import WeatherDataset
-
     import hycom_emulator.datastore  # noqa: F401  registers the hycom kind
     import hycom_emulator.convnet  # noqa: F401  registers hycom_graph_lam and hycom_conv_graph_lam
     import hycom_emulator.rcan  # noqa: F401  registers rcan_graph_lam
@@ -107,7 +107,7 @@ def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int, model:
     import hycom_emulator.rea_loss  # noqa: F401  checkpoints trained with loss rea_wmse name it
 
     config, ds = load_config_and_datastore(config_path=str(config_path))
-    data = WeatherDataset(ds, split=split, ar_steps=ar_steps, num_past_forcing_steps=1, num_future_forcing_steps=1)
+    data = forecast_windows(ds, split, ar_steps, forcing=forcing)
     module = None
     if ckpt is not None and Path(ckpt).suffix == ".pt":  # a hycom_emulator.stencil step, not a Lightning checkpoint
         from hycom_emulator.stencil import load_module
@@ -127,9 +127,10 @@ def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int, model:
     return ds, data, module
 
 
-def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps: int = 2, model: str | None = None) -> dict:
-    ds, data, module = load(config_path, ckpt, split, ar_steps, model)
-    head = {"split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt) if ckpt else None, "model": model}
+def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps: int = 2, model: str | None = None, *,
+             forcing: Forcing) -> dict:
+    ds, data, module = load(config_path, ckpt, split, ar_steps, model, forcing=forcing)
+    head = {"forcing_mode": forcing.name, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt) if ckpt else None, "model": model}
     if not ds.is_ensemble:
         return head | _score(ds, data, module, split, ar_steps, range(len(data)), None)
     members = ds.get_dataarray("state", split)["ensemble_member"].values.tolist()
@@ -149,7 +150,7 @@ def _score(ds, data, module, split, ar_steps, indices, member) -> dict:
     acc = Accumulator()
     for idx in indices:
         sample = data[idx]
-        init_states, target_states, _, times = sample
+        init_states, target_states, times = sample.init, sample.truth, sample.times
         model_pred = forecast(module, sample) if module is not None else None
         x0 = init_states[-1].numpy()
         persist_inc = persistence_inc(x0, forcing, times, inc_cols)
@@ -171,10 +172,10 @@ def _score(ds, data, module, split, ar_steps, indices, member) -> dict:
 
 
 def forecast(module, sample) -> np.ndarray:
-    """(ar_steps, grid, state_feature) model forecast in physical units for one WeatherDataset sample."""
+    """(ar_steps, grid, state_feature) model forecast in physical units for one forcing_mode.Window."""
     import torch
 
-    batch = tuple(t[None].to(module.device) for t in sample)
+    batch = tuple(t[None].to(module.device) for t in sample.batch)
     with torch.no_grad():
         batch = module.on_after_batch_transfer(batch, 0)
         pred, _, _, _ = module.common_step(batch)
@@ -219,7 +220,7 @@ def main() -> None:
     p.add_argument("--model", default=None, help="step predictor to load the weights into, e.g. hycom_graph_lam")
     a = p.parse_args()
     ckpt = None if a.ckpt == "none" else Path(a.ckpt)
-    res = evaluate(a.config, ckpt, a.split, a.ar_steps, a.model)
+    res = evaluate(a.config, ckpt, a.split, a.ar_steps, a.model, forcing=Forcing.ORACLE)
     a.out.write_text(json.dumps(res, indent=1))
     print(json.dumps(res, indent=1))
 

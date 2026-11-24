@@ -119,9 +119,10 @@ def test_samples_come_from_one_member(runs):
 
 def test_scores_each_member(runs):
     from hycom_emulator.evaluate_b00 import evaluate
+    from hycom_emulator.forcing_mode import Forcing
 
     root, _ = runs
-    res = evaluate(root / "nlam.yaml", None, "test", ar_steps=2)
+    res = evaluate(root / "nlam.yaml", None, "test", ar_steps=2, forcing=Forcing.ORACLE)
     free, twin = res["members"]["free"], res["members"]["twin"]
     assert free["samples"] == twin["samples"] == 6 - 5 + 1
     t = free["scores"]["temp"]["+24h"]
@@ -138,3 +139,30 @@ def test_members_must_share_the_grid(tmp_path):
     b = write_pack(tmp_path / "b", *_run(rng, False, atm), boundary=other)
     with pytest.raises(ValueError, match="boundary_mask"):
         stack({"a": a, "b": b}, tmp_path / "ens", TRAIN_END)
+
+
+def test_forecast_windows_match_weather_dataset_and_hold_t0_under_persistence(runs):
+    import torch
+    from neural_lam.weather_dataset import WeatherDataset
+
+    from hycom_emulator.datastore import HycomDatastore
+    from hycom_emulator.forcing_mode import Forcing, forecast_windows
+
+    root, arrays = runs
+    ds = HycomDatastore(root / "b00.yaml")
+    plain = WeatherDataset(ds, split="train", ar_steps=2, num_past_forcing_steps=1, num_future_forcing_steps=1)
+    oracle = forecast_windows(ds, "train", 2, forcing=Forcing.ORACLE)
+    held = forecast_windows(ds, "train", 2, forcing=Forcing.ISSUE_TIME_PERSISTENCE)
+    assert len(plain) == len(oracle) == len(held) > 0
+    for idx in range(len(plain)):
+        for a, b in zip(plain[idx], oracle[idx].batch):
+            assert torch.equal(a, b)
+        sample, member = divmod(idx, 2)
+        state, forcing = arrays[["free", "twin"][member]]
+        w = held[idx]
+        t0 = sample + 1
+        np.testing.assert_array_equal(w.boundary.numpy(), np.stack([state[t0]] * 2))
+        np.testing.assert_array_equal(w.truth.numpy(), state[t0 + 1:t0 + 3])
+        for k in range(2):
+            for slot in range(3):
+                np.testing.assert_array_equal(w.forcing.numpy()[k, :, slot::3], forcing[t0])

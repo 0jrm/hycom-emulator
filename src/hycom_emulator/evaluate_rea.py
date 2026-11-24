@@ -29,6 +29,7 @@ import numpy as np
 import xarray as xr
 import yaml
 
+from hycom_emulator.forcing_mode import FREE_FORECAST_LABEL, Forcing
 from hycom_emulator.isotach import ISOTACH_MS, FrontDistance, FrontStatus, front_distance, gulf_region, mercator_cell_km, to_grid
 
 LEVEL_VARS = ("temp", "salin", "u", "v")
@@ -162,10 +163,10 @@ def in_period(target_times_ns: np.ndarray, period: tuple[str, str] | None) -> bo
 
 
 def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | None = None, region_name: str = "gulf",
-             period: tuple[str, str] | None = None, zero_noise: bool = False) -> dict:
+             period: tuple[str, str] | None = None, zero_noise: bool = False, *, forcing: Forcing) -> dict:
     from hycom_emulator.evaluate_b00 import forecast, load
 
-    ds, data, module = load(config, ckpt, split, ar_steps)
+    ds, data, module = load(config, ckpt, split, ar_steps, forcing=forcing)
     if zero_noise:
         noise_off(module)
     meta = xr.open_zarr(pack_path(config) / "meta.zarr", consolidated=True).load()
@@ -176,15 +177,15 @@ def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | N
     fg = front_grid(meta, names)
     acc: dict = {}
     fronts: dict[str, list] = {"model": [], "persistence": []}
-    indices = [i for i in range(len(data)) if in_period(data[i][3].numpy(), period)][:limit]
+    indices = [i for i in range(len(data)) if in_period(data[i].times.numpy(), period)][:limit]
     for i in indices:
         sample = data[i]
-        x0, truth, pred = sample[0][-1].numpy(), sample[1].numpy(), forecast(module, sample)
+        x0, truth, pred = sample.init[-1].numpy(), sample.truth.numpy(), forecast(module, sample)
         accumulate(acc, x0, truth, pred, w)
         fronts["model"].append(front_distances(fg, truth, pred))
         fronts["persistence"].append(front_distances(fg, truth, x0))
     return {
-        "label": "free forecast given the true daily wind and boundary band (no increments, no observations after t0)",
+        "label": FREE_FORECAST_LABEL[forcing], "forcing_mode": forcing.name,
         "region": region_name, "period": list(period) if period else None, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt), "zero_noise": zero_noise,
         "samples": len(indices),
         "fields": summarize(acc, names, level_weights(levels)),
@@ -205,7 +206,8 @@ def main() -> None:
     p.add_argument("--period", nargs=2, metavar=("START", "END"), help="score only forecasts whose initial and target days lie in [START, END], e.g. one source experiment")
     p.add_argument("--zero-noise", action="store_true", help="score a crps_graph_lam checkpoint's z = 0 forecast (noise off)")
     a = p.parse_args()
-    r = evaluate(a.config, a.ckpt, a.split, a.ar_steps, a.limit, a.region, tuple(a.period) if a.period else None, a.zero_noise)
+    r = evaluate(a.config, a.ckpt, a.split, a.ar_steps, a.limit, a.region, tuple(a.period) if a.period else None, a.zero_noise,
+                 forcing=Forcing.ORACLE)
     a.out.write_text(json.dumps(r, indent=1))
     for name in (*LEVEL_VARS, "ssh"):
         row = " ".join(f"{lead}d {s['rmse_model'] / s['rmse_persistence']:.3f}" for lead, s in r["fields"][name].items())
