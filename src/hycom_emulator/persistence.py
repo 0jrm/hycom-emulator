@@ -39,7 +39,8 @@ def persistence_losses(config_path: str, split: str, ar_steps: int, loss_name: s
     idx = np.arange(len(data)) if n is None else np.linspace(0, len(data) - 1, min(n, len(data))).astype(int)
     rows = []
     for i in idx:
-        init, target = data[i].init, data[i].truth
+        window = data[i]
+        init, target = window.init, window.truth
         x0, target = (init[1] - mean) / std, (target - mean) / std
         rows.append([loss(x0[None], target[k][None], per_var_std, mask=mask).item() for k in range(ar_steps)])
     return np.array(rows)

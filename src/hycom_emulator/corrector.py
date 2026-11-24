@@ -109,7 +109,7 @@ def collect(config: Path, ckpt: Path, out: Path, stage: str, starts: list[str], 
         print(f"collect {stage}: starts {b0 + 1}..{min(b0 + batch, len(todo))} of {len(todo)}", flush=True)
     out.mkdir(parents=True, exist_ok=True)
     meta = {"config": str(config), "ckpt": str(ckpt), "stage": stage, "k": k, "starts": [str(t.date) for t in todo],
-            "forcing": Forcing.ORACLE.name, "horizon": horizon, "names": m.geo.names, "levels": lay.levels.tolist(), "shape": list(m.shape)}
+            "forcing_mode": m.forcing.name, "horizon": horizon, "names": m.geo.names, "levels": lay.levels.tolist(), "shape": list(m.shape)}
     for jb, g in enumerate(grams):
         g.meta = {**meta, "bin": list(LEAD_BINS[jb])}
         g.to("cpu").save(out / f"grams_b{jb}.pt")
@@ -349,7 +349,7 @@ def evaluate(config: Path, ckpt: Path, mean: Path, noise: Path, out: Path, start
         w.writeheader()
         w.writerows(rows)
     (out / "evaluate.json").write_text(json.dumps({"ckpt": str(ckpt), "mean": str(mean), "noise": str(noise), "M": M,
-                                                   "forcing": Forcing.ORACLE.name, "sweeps": sweeps, "starts": [str(t.date) for t in todo], "horizon": horizon,
+                                                   "forcing_mode": m.forcing.name, "sweeps": sweeps, "starts": [str(t.date) for t in todo], "horizon": horizon,
                                                    "T": N["T"].tolist(), "seed": seed}, indent=1))
 
 

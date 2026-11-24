@@ -113,7 +113,7 @@ def evaluate(config: Path, ckpt: Path, members: int, split: str, ar_steps: int, 
         sample = data[i]
         accumulate(acc, sample.init[-1].numpy(), sample.truth.numpy(), ensemble_forecast(module, sample, members), w)
     return {
-        "label": FREE_FORECAST_LABEL[forcing], "forcing": forcing.name,
+        "label": FREE_FORECAST_LABEL[forcing], "forcing_mode": forcing.name,
         "region": region_name, "split": split, "ar_steps": ar_steps, "members": members, "checkpoint": str(ckpt),
         "samples": len(indices), "fields": summarize(acc, names, level_weights(levels), members),
     }

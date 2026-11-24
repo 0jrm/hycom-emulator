@@ -185,7 +185,7 @@ def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | N
         fronts["model"].append(front_distances(fg, truth, pred))
         fronts["persistence"].append(front_distances(fg, truth, x0))
     return {
-        "label": FREE_FORECAST_LABEL[forcing], "forcing": forcing.name,
+        "label": FREE_FORECAST_LABEL[forcing], "forcing_mode": forcing.name,
         "region": region_name, "period": list(period) if period else None, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt), "zero_noise": zero_noise,
         "samples": len(indices),
         "fields": summarize(acc, names, level_weights(levels)),

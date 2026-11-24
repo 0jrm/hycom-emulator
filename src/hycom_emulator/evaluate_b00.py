@@ -130,7 +130,7 @@ def load(config_path: Path, ckpt: Path | None, split: str, ar_steps: int, model:
 def evaluate(config_path: Path, ckpt: Path | None, split: str = "test", ar_steps: int = 2, model: str | None = None, *,
              forcing: Forcing) -> dict:
     ds, data, module = load(config_path, ckpt, split, ar_steps, model, forcing=forcing)
-    head = {"forcing": forcing.name, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt) if ckpt else None, "model": model}
+    head = {"forcing_mode": forcing.name, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt) if ckpt else None, "model": model}
     if not ds.is_ensemble:
         return head | _score(ds, data, module, split, ar_steps, range(len(data)), None)
     members = ds.get_dataarray("state", split)["ensemble_member"].values.tolist()

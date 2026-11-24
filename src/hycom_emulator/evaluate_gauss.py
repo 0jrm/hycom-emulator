@@ -105,7 +105,7 @@ def evaluate(config: Path, ckpt: Path, split: str, ar_steps: int, limit: int | N
         return acc, len(indices)
 
     out = {
-        "label": FREE_FORECAST_LABEL[forcing], "forcing": forcing.name,
+        "label": FREE_FORECAST_LABEL[forcing], "forcing_mode": forcing.name,
         "region": region_name, "split": split, "ar_steps": ar_steps, "checkpoint": str(ckpt),
     }
     scale = None

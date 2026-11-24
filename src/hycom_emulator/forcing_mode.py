@@ -64,21 +64,15 @@ class Windows:
         if not 0 <= issue <= idx:
             raise ValueError(f"window {idx} cannot belong to a run issued at window {issue}")
         issued = item if issue == idx else self.base[issue]
-        return Window(*held_at_issue(issued[0], issued[2], forcing, idx - issue), times, target)
+        return Window(*held_at_issue(issued[0], issued[2], len(target)), times, target)
 
 
-def held_at_issue(init0, forcing0, forcing, lag: int) -> tuple:
-    """(init, boundary, forcing) for a window lag windows after the run's issue window, which gave init0 and forcing0.
-    Forcing slots up to t0 keep their value; every later slot takes its feature's t0 value. The band is the t0 state.
+def held_at_issue(init0, forcing0, ar_steps: int) -> tuple:
+    """(init, boundary, forcing) of ar_steps steps from the issue window's init0 and forcing0: every forcing slot takes
+    its feature's t0 value (slot 0 of step 0 is row t0, the only slot not after t0) and the band is the t0 state.
     Works on numpy arrays and torch tensors alike."""
-    ar, _, width = forcing.shape
-    t0_slot = [c - c % FORCING_WINDOW for c in range(width)]  # step 0, window 0 is row t0
-    held = forcing0[:1, :, t0_slot][[0] * ar]
-    for k in range(ar):
-        for w in range(FORCING_WINDOW):
-            if lag + k + w <= 0:  # window w of step k is row t0 + lag + k + w
-                held[k, :, w::FORCING_WINDOW] = forcing[k, :, w::FORCING_WINDOW]
-    return init0, init0[[1] * ar], held
+    t0_slot = [c - c % FORCING_WINDOW for c in range(forcing0.shape[-1])]
+    return init0, init0[[1] * ar_steps], forcing0[:1, :, t0_slot][[0] * ar_steps]
 
 
 def forecast_windows(datastore, split: str, ar_steps: int, *, forcing: Forcing) -> Windows:

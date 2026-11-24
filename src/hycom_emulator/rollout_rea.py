@@ -484,7 +484,7 @@ def done(parts: Path) -> dict[np.datetime64, tuple[int, str, str]]:
     for p in sorted(parts.glob("*.nc")):
         with xr.open_dataset(p) as d:
             for t, h in zip(d.start.values.astype("datetime64[D]"), d.horizon.values):
-                out[t] = (int(h), d.attrs["checkpoint_md5"], d.attrs.get("forcing", Forcing.ORACLE.name))
+                out[t] = (int(h), d.attrs["checkpoint_md5"], d.attrs.get("forcing_mode", Forcing.ORACLE.name))
     return out
 
 
@@ -578,7 +578,7 @@ def run(config: Path, ckpt: Path, out: Path, horizon: int, chunk: int, batch: in
     if clash := [str(s.date) for s in todo if s.date in have and have[s.date] != (s.horizon, md5, forcing.name)]:
         raise ValueError(f"{parts} holds other runs (horizon, checkpoint or forcing differ) for {', '.join(clash[:5])}; use a new out_dir")
     todo = [s for s in todo if s.date not in have]
-    attrs = {"label": LABEL[forcing], "forcing": forcing.name, "checkpoint": str(ckpt), "checkpoint_md5": md5, "code_sha": _code_sha(), "region": REGION,
+    attrs = {"label": LABEL[forcing], "forcing_mode": forcing.name, "checkpoint": str(ckpt), "checkpoint_md5": md5, "code_sha": _code_sha(), "region": REGION,
              "chunk": chunk, "max_horizon": horizon, "batch": batch,
              "interpolated_truth_days": " ".join(str(t)[:10] for t in m.times[m.meta.time_filled.values])}
     timing = out / "timing.json"
@@ -623,7 +623,7 @@ def check(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int, 
             ref = single.pred[..., cols]
             new = [(chunked.pred[..., cols] - ref).abs().max().item(), (repeat.pred[..., cols] - ref).abs().max().item(), ref.abs().max().item()]
             acc[g] = np.maximum(acc[g], new)
-    res = {"label": LABEL[forcing], "forcing": forcing.name, "checkpoint": str(ckpt), "starts": [str(s.date) for s in todo], "horizon": horizon, "chunk": chunk,
+    res = {"label": LABEL[forcing], "forcing_mode": forcing.name, "checkpoint": str(ckpt), "starts": [str(s.date) for s in todo], "horizon": horizon, "chunk": chunk,
            "groups": {g: {"chunked_vs_single": {"max_abs": a[0], "max_rel": a[0] / a[2]},
                           "repeat_vs_single": {"max_abs": a[1], "max_rel": a[1] / a[2]}} for g, a in acc.items()}}
     out.write_text(json.dumps(res, indent=1))
@@ -784,7 +784,7 @@ def fields(config: Path, ckpt: Path, out: Path, starts: list[str], horizon: int,
               "lat": ("grid_index", st("lat")), "depth": ("grid_index", st("depth")),
               "region": ("grid_index", m.geo.region.cpu().numpy())}
     dlon = float(np.median(np.diff(np.unique(np.round(st("lon"), 6)))))
-    attrs = {"label": LABEL[forcing], "forcing": forcing.name, "region_def": REGION, "checkpoint": str(ckpt), "checkpoint_md5": _md5(ckpt), "code_sha": _code_sha(),
+    attrs = {"label": LABEL[forcing], "forcing_mode": forcing.name, "region_def": REGION, "checkpoint": str(ckpt), "checkpoint_md5": _md5(ckpt), "code_sha": _code_sha(),
              "chunk": chunk, "nx": m.shape[0], "ny": m.shape[1], "dlon": dlon,
              "created": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     ds = xr.Dataset(data, coords, attrs).sortby("start")
