@@ -20,8 +20,8 @@ import hycom_emulator.datastore  # noqa: F401  registers DATASTORES["hycom"]
 import hycom_emulator.convnet  # noqa: F401  registers the conv models and, via physics, hycom_graph_lam and hycom_wmse
 import hycom_emulator.rcan  # noqa: F401  registers rcan_graph_lam
 import hycom_emulator.rea_loss  # noqa: F401  registers rea_wmse
-from hycom_emulator import ensemble  # registers crps_graph_lam, afcrps and fcrps
-from hycom_emulator import gauss  # registers wcrps_gauss and std_feedback_graph_lam
+from hycom_emulator import ensemble
+from hycom_emulator import gauss
 
 
 def _load_own_checkpoints() -> None:

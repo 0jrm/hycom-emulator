@@ -51,7 +51,7 @@ printf 'datastore:\n  kind: hycom\n  config_path: b00.yaml\n' > "$OUT/nlam.yaml"
 cd "$OUT"
 ARM_ARGS=$($PY -m hycom_emulator.physics arm "${ARM:-control}" b00.yaml nlam.yaml); MODEL+=($ARM_ARGS); echo "arm ${ARM:-control}: $ARM_ARGS"
 best() { find "$OUT/runs" -path "*$1*/checkpoints/min_val_loss.ckpt" -printf "%T@ %p\n" | sort -n | tail -1 | cut -d" " -f2; }
-lowest() {  # the checkpoint with the lowest stored val loss; empty arguments are skipped
+lowest() {
   $PY - "$@" <<'PY'
 import sys, torch
 def score(path):
@@ -79,7 +79,7 @@ timeout --signal=INT ${CAP2:-210m} $PY -m hycom_emulator.nlam train_model --conf
   --epochs $(( E1 + 1 + ${EPOCHS2:-100} )) --ar_steps_train ${AR2:-2} --load "$S1" --logger_run_name "$RUN_ID-s2" || echo "stage 2 exit $? (124 = time cap reached)"
 if [ -n "${INIT:-}" ]; then S2=$(best "$RUN_ID-s2"); [ -n "$S2" ] || { echo "fine-tune left no checkpoint"; exit 1; }
 else
-S2=$(lowest "$S1" "$(best "$RUN_ID-s2")")  # val uses --ar_steps_eval 2 in both stages, so the scores compare
+S2=$(lowest "$S1" "$(best "$RUN_ID-s2")")
 [ "$S2" != "$S1" ] || echo "stage 2 did not beat stage 1 on val; scoring stage 1"
 fi
 echo "scored checkpoint: $S2"

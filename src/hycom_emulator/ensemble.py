@@ -95,7 +95,7 @@ def crps_ensemble(pred, target, pred_std, mask=None, average_grid=True, sum_vars
     if m == 1:
         entry = skill
     else:
-        ranked = pred.sort(dim=-3).values  # sum_{j<k} |x_j - x_k| = sum_i (2i - M + 1) x_(i)
+        ranked = pred.sort(dim=-3).values
         coef = (2 * torch.arange(m, device=pred.device, dtype=pred.dtype) - m + 1).view(m, 1, 1)
         pair_sum = (coef * ranked).sum(-3)
         entry = skill - (1 - (1 - alpha) / m) * pair_sum / (m * (m - 1))

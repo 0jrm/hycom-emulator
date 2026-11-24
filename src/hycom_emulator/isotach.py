@@ -41,7 +41,7 @@ class FrontStatus(enum.StrEnum):
     BOTH_EMPTY = "both_empty"
 
 
-_STATUS = {  # (pred has a front, true has a front)
+_STATUS = {
     (True, True): FrontStatus.OK,
     (True, False): FrontStatus.TRUE_EMPTY,
     (False, True): FrontStatus.PRED_EMPTY,

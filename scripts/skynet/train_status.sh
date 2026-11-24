@@ -1,6 +1,5 @@
 #!/bin/bash
 # Progress and ETA of a train_b00.sh run. usage: train_status.sh <run_id>
-# Stage caps match train_b00.sh: stage 1 300 epochs or 7 h, stage 2 100 epochs or 3.5 h.
 OUT=/scratch/jmiranda/hycom-emulator-runs/${1:?run_id}
 pgrep -f "train_b00.sh $1 " > /dev/null && STATE=running || STATE=stopped
 /conda/jmiranda/venvs/hycom-emulator/bin/python - "$OUT" "$STATE" <<'PY'

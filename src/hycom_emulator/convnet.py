@@ -56,10 +56,6 @@ G2M_RADIUS = 0.67  # neural-lam create_graph: grid nodes within 0.67 mesh spacin
 M2G_NEIGHBOURS = 4
 
 
-# Option B on the stride-2 reanalysis grid (263x193, 0.08 deg) under the multiscale mesh (81x81, 0.26 deg spacing).
-# Conv stride 2 gives B00 option B's cells (0.16 deg, 0.6 mesh spacings: every mesh node has a grid sender within
-# G2M_RADIUS, median 4). At stride 4 the cells (0.32 deg) are coarser than the mesh: 569 of 6561 mesh nodes get no
-# sender and the median is 1.
 REA_ARCHS = {
     "unet_norm": {"model": "conv_graph_lam", "graph": "multiscale_s2",
                   "conv": {"blocks": 3, "channel_attention": True, "stride": 2, "norm": True}},

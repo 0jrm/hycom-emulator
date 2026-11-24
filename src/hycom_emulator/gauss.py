@@ -124,7 +124,7 @@ def init_from_deterministic(module: GaussForecasterModule, path: str) -> None:
     weight, bias = state[head + "weight"], state[head + "bias"]
     sigma0 = INIT_STD * predictor.diff_std.cpu()
     state[head + "weight"] = torch.cat([weight, torch.zeros_like(weight)])
-    state[head + "bias"] = torch.cat([bias, sigma0 + torch.log(-torch.expm1(-sigma0))])  # softplus^-1
+    state[head + "bias"] = torch.cat([bias, sigma0 + torch.log(-torch.expm1(-sigma0))])
     if getattr(predictor, "std_feedback", False):
         key = "forecaster.predictor.grid_embedder.0.weight"
         w = state[key]

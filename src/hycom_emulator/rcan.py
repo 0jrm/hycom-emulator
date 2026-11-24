@@ -59,7 +59,7 @@ from torch.utils.checkpoint import checkpoint
 
 from hycom_emulator.convnet import ResBlock, _image, _nodes
 
-RCAN_MODULES = ("levels.", "exit")  # exit_norm. and exit.
+RCAN_MODULES = ("levels.", "exit")
 STRIDE_TOLERANCE = 0.02  # relative: a level's cell may differ from a whole multiple of the previous one by this much
 
 
@@ -68,7 +68,7 @@ class Level:
     cell_deg: float
     enc: tuple[int, int]  # groups, blocks per group
     dec: tuple[int, int]
-    channel_attention: bool | None = None  # None: the section's
+    channel_attention: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -262,7 +262,7 @@ class RcanGraphLAM(GraphLAM):
             mask = F.max_pool2d(_pad(mask, s), s) if k else mask
             self.register_buffer(f"mask{k}", mask, persistent=False)
         self.exit_norm = nn.LayerNorm(width)
-        self.exit = nn.Linear(width, width)  # a 1x1 conv on nodes
+        self.exit = nn.Linear(width, width)
         nn.init.zeros_(self.exit.weight)
         nn.init.zeros_(self.exit.bias)
         last = len(cfg.levels) - 1

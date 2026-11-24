@@ -23,12 +23,12 @@ from hycom_emulator.system import SystemConfig
 
 H = timedelta(hours=1)
 ROLES: dict[str, tuple[str, timedelta]] = {
-    "restart_start": ("restart", -24 * H),  # instantaneous state the run started from
-    "incupd_applied": ("incupd", -24 * H),  # increment applied during the run
+    "restart_start": ("restart", -24 * H),
+    "incupd_applied": ("incupd", -24 * H),
     "archm_21": ("archm", -21 * H),  # 6 h mean, t_a-24h .. t_a-18h
     "archv_00": ("archv", -18 * H),  # snapshot 6 h into the run
     "archm_09": ("archm", -9 * H),  # 18 h mean, t_a-18h .. t_a; with archm_21 the TSIS background
-    "inc_nc": ("inc_nc", 0 * H),  # TSIS increment (target of module A)
+    "inc_nc": ("inc_nc", 0 * H),
     "incupd": ("incupd", 0 * H),  # same increment as HYCOM reads it
     "restart_end": ("restart", 0 * H),
     "tsis_obs": ("tsis_obs", 6 * H),  # TSIS labels the analysis t_a+6h (time_offset 0.25)

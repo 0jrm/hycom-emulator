@@ -61,7 +61,7 @@ class HycomDatastore(BaseRegularGridDatastore):
         self._config = yaml.safe_load(self._config_path.read_text())
         self._ds = _open(Path(self._config["zarr"]))
         self.is_ensemble = self.has_ensemble_forcing = "ensemble_member" in self._ds["state"].dims
-        if "physics" in self._config:  # hycom_wmse reads its settings from here
+        if "physics" in self._config:
             from hycom_emulator.physics import CONTEXT
 
             CONTEXT.configure(self)
@@ -157,7 +157,7 @@ def _open(path: Path) -> xr.Dataset:
         if arr.dtype == np.int16:
             if scale is None:
                 raise ValueError(f"{path}/{name}.npy is int16 but meta.zarr has no int16_scale (an unfinished conversion?)")
-            std = ds.get(f"{name}_int16_std", ds[f"{name}_std"])  # rea_pack refloor keeps the std the values were quantized with
+            std = ds.get(f"{name}_int16_std", ds[f"{name}_std"])
             arr = indexing.LazilyIndexedArray(_FixedPoint(arr, ds[f"{name}_mean"].values, std.values, scale))
         ds[name] = xr.Variable(dims, arr)
     return ds

@@ -157,7 +157,7 @@ def fit_noise(train: Path, held: Path, mean: Path, out: Path, lam: float) -> dic
         W[:, keep] = Wk
         Sel = torch.zeros(C, P, dtype=torch.float64)
         Sel[torch.arange(C), torch.tensor(centre_columns(C, k))] = 1.0
-        D = Sel - W  # e = D phi
+        D = Sel - W
         S = torch.zeros(C, C, dtype=torch.float64)
         for la in np.unique(levels):
             for lb in np.unique(levels):
@@ -166,7 +166,7 @@ def fit_noise(train: Path, held: Path, mean: Path, out: Path, lam: float) -> dic
                 S[np.ix_(ia, ib)] = D[ia] @ G @ D[ib].T / n
         S = 0.5 * (S + S.T)
         ev, V = torch.linalg.eigh(S)
-        L = V * ev.clamp_min(1e-10).sqrt()  # Sigma = L L^T, robust to a near-singular Sigma
+        L = V * ev.clamp_min(1e-10).sqrt()
         Ws.append(W.float())
         Ls.append(L.float())
         info.append({"bin": list(LEAD_BINS[jb]), "sigma_diag_median": float(S.diagonal().median()), "min_eig": float(ev.min())})
@@ -223,7 +223,7 @@ def ens_stats(members: torch.Tensor, truth: torch.Tensor, m) -> dict:
         out[f"spread_{f}"] = float(((w * x.var(0, unbiased=True)).sum() / ws).sqrt())
         xs, _ = torch.sort(x, 0)
         rank = torch.arange(1, M + 1, device=x.device, dtype=x.dtype).view(-1, *([1] * (x.dim() - 1)))
-        pair = (2 * (2 * rank - M - 1) * xs).sum(0) / (M * (M - 1))  # mean over m != m' of |x_m - x_m'|
+        pair = (2 * (2 * rank - M - 1) * xs).sum(0) / (M * (M - 1))
         crps = (x - y).abs().mean(0) - 0.5 * pair
         out[f"crps_{f}"] = float((w * crps).sum() / ws)
     return out
@@ -235,7 +235,7 @@ def point_stats(x: torch.Tensor, truth: torch.Tensor, m) -> dict:
         cols, w = _weights(m, f)
         e = (x[..., cols] - truth[..., cols]).double()
         out[f"rmse_{f}"] = float(((w * e * e).sum() / w.sum()).sqrt())
-        out[f"crps_{f}"] = float((w * e.abs()).sum() / w.sum())  # CRPS of a point forecast is its absolute error
+        out[f"crps_{f}"] = float((w * e.abs()).sum() / w.sum())
     return out
 
 
@@ -276,9 +276,7 @@ def calibrate(config: Path, ckpt: Path, mean: Path, noise: Path, starts: list[st
                     acc[jb, a] += (st[f"spread_{f}"] ** 2, st[f"rmse_{f}"] ** 2)
         rr.release_pack_pages(m.datastore)
         print(f"calibrate: starts {b0 + 1}..{min(b0 + batch, len(todo))} of {len(todo)}", flush=True)
-    ratio = np.sqrt(acc[..., 0] / acc[..., 1]) * np.sqrt((M + 1) / M)  # spread over error with the finite-M factor
-    # The chain at T = 1 is linear in its noise, so multiplying a field's residual by 1 / ratio sets its spread over
-    # error to 1. One factor per lead bin and field (temp, salin, u, v by name; ssh, ubaro, vbaro take ssh's).
+    ratio = np.sqrt(acc[..., 0] / acc[..., 1]) * np.sqrt((M + 1) / M)
     d = torch.load(noise, map_location="cpu", weights_only=False)
     from hycom_emulator.realism import group_of
     names = m.geo.names

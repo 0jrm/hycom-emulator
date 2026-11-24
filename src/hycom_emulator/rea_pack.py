@@ -64,7 +64,6 @@ FORMAT = 1
 INT16_SCALE = 2000  # counts per standard deviation
 INT16_CLIP = 16  # standard deviations
 FILL = 1e29
-# State std floor per level variable: max(physical minimum, STATE_STD_MEDIAN_FRACTION x the median std over the column).
 STATE_STD_MIN = {"temp": 0.05, "salin": 0.02, "u": 0.01, "v": 0.01}  # degC, psu, m/s
 STATE_STD_MEDIAN_FRACTION = 0.1
 # A level that sits on the sea floor can be fill on some days and valid on others (6 points at 800 m on the
@@ -83,7 +82,7 @@ UNITS = {"temp": "degC", "salin": "psu", "u": "m/s", "v": "m/s", "ssh": "m", "ub
          "wnd_ewd": "m/s", "wnd_nwd": "m/s", "sin_doy": "1", "cos_doy": "1", "insolation": "W/m2"}
 
 GULF_SEED = (-90.0, 25.0)
-GULF_SECTIONS = (((-87.1, 21.5), (-84.8, 21.95)), ((-81.1, 25.4), (-81.1, 22.9)))  # Yucatan Channel, Florida Straits
+GULF_SECTIONS = (((-87.1, 21.5), (-84.8, 21.95)), ((-81.1, 25.4), (-81.1, 22.9)))
 
 S0 = 1361.0
 OMEGA = 7.2921e-5

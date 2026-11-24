@@ -15,7 +15,7 @@ import xarray as xr
 from hycom_emulator import structure as st
 from hycom_emulator import topology as tp
 
-SHA256 = {  # data_version of the reference run
+SHA256 = {
     2017: "d741fa218fe35c9fc8e5e128d8fd601f17b2d6fd1a83f72b69550e20f20e7c68",
     2018: "19ae1a70e38854ba86404114ad24858a41a8e10190122e217a0584accd421251",
     2019: "731605d17ec502e198e9d613aaa486b9269382840f9c838a519518d359f5bf20",
@@ -33,7 +33,7 @@ EXPECTED = [  # separation_date, censored, piece_max_lat, piece_max_lon, piece_p
 def main(root: Path) -> int:
     paths = [root / f"duacs_gulf_wide_{y}.nc" for y in SHA256]
     bad = [p.name for p, h in zip(paths, SHA256.values()) if hashlib.sha256(p.read_bytes()).hexdigest() != h]
-    if bad:  # skynet's copies are separate downloads of the same product; the events below decide
+    if bad:
         print(f"warning: bytes differ from the reference run's files (another download?): {bad}")
     ds = xr.concat([xr.open_dataset(p)[["adt", "sla"]].load() for p in paths], "time").sortby("latitude").sortby("longitude")
     ds = ds.sel(longitude=slice(-98.0, -80.0), latitude=slice(18.0, 31.0))

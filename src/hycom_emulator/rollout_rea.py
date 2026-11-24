@@ -61,7 +61,7 @@ UNITS = {"temp": "degC", "salin": "psu", "u": "m/s", "v": "m/s", "ssh": "m"}
 MEANS = ("temp_0m", "temp_100m", "salin_0m", "ssh")
 BANDS = {"lt50km": (0, 50), "50to100km": (50, 100), "100to200km": (100, 200), "gt200km": (200, np.inf)}  # wavelength
 SPECTRA = ("ssh", "temp_100m")
-LC_LEVEL, LC_MIN_DEPTH, LCE_MIN_KM2 = 0.17, 500.0, 1000.0  # gom-da runs/emu-align-probe7/probe.py
+LC_LEVEL, LC_MIN_DEPTH, LCE_MIN_KM2 = 0.17, 500.0, 1000.0
 YUCATAN_STRIP = {"lat": (21.9, 22.4), "lon": (-87.0, -84.8)}
 IN_SAMPLE_END = np.datetime64("2022-01-01")
 DAY = np.timedelta64(1, "D")
@@ -107,9 +107,9 @@ class Geometry:
     point: torch.Tensor  # (grid, feature) float64, evaluate_rea.point_weights
     region: torch.Tensor  # (grid,) bool
     area_sum: float  # sum of area over region
-    plane: Plane | None = None  # 2D diagnostics (spectra, Loop Current); load_model sets it
-    ops: op.OpGrid | None = None  # operator diagnostics; load_model sets it
-    front: FrontGrid | None = None  # 1.5 kt isotach front; load_model sets it
+    plane: Plane | None = None
+    ops: op.OpGrid | None = None
+    front: FrontGrid | None = None
 
 
 @dataclass(frozen=True)
@@ -202,7 +202,7 @@ class Step:
     x0: torch.Tensor
     pred_prev: torch.Tensor
     truth_prev: torch.Tensor
-    cache: dict = field(default_factory=dict)  # per-step results that several STATS share
+    cache: dict = field(default_factory=dict)
 
 
 def _err(s: Step, g: Geometry, f: str, ref: str):
@@ -427,7 +427,7 @@ def unroll(module, window: Callable, times: np.ndarray, starts: list[Start], chu
             samples.append(sample)
         target, forcing, ttimes = (torch.stack([_pad(getattr(x, f), n) for x in samples]).to(module.device)
                                    for f in ("truth", "forcing", "times"))
-        same = all(x.boundary is x.truth for x in samples)  # ORACLE: one tensor, stacked once
+        same = all(x.boundary is x.truth for x in samples)
         boundary = target if same else torch.stack([_pad(x.boundary, n) for x in samples]).to(module.device)
         if carry is None:
             carry = torch.stack([x.init for x in samples]).to(module.device)

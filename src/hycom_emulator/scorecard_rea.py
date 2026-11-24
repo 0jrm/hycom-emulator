@@ -26,7 +26,7 @@ from hycom_emulator.rollout_rea import BANDS, MEANS, SPECTRA, TIES
 RATIO_BAND = (0.9, 1.1)
 INVERSION_BAND = (0.5, 2.0)
 COUNT_BAND = (0.67, 1.5)
-FRONT_BAND = (0.0, 1.0)  # model front distance over persistence's: departs when the front is placed no better than persistence
+FRONT_BAND = (0.0, 1.0)
 RUN = 3  # leads outside the band in a row
 TRUTH_RESIDUAL_MAX = 0.5
 REPORT_LEADS = (1, 4, 7, 10, 14, 21, 30, 45, 60)
@@ -35,9 +35,9 @@ REPORT_LEADS = (1, 4, 7, 10, 14, 21, 30, 45, 60)
 @dataclass(frozen=True)
 class Diagnostic:
     name: str
-    family: str  # blur, drift, eddies, ties, structure
+    family: str
     band: tuple[float, float]
-    reduce: str  # median or mean over starts
+    reduce: str
     series: Callable[[xr.Dataset], xr.DataArray]
 
 
@@ -51,7 +51,7 @@ def diagnostics(ds: xr.Dataset) -> list[Diagnostic]:
     d += [Diagnostic(f"spec_{ch}_{b}", "blur", RATIO_BAND, "median", ratio(f"spec_{ch}_{b}_ratio")) for ch in SPECTRA for b in BANDS]
     for ch in MEANS:
         truth = ds[f"mean_{ch}_truth"]
-        s = float((truth - truth.shift(lead=7)).std())  # the truth's own 7-day change of the Gulf mean
+        s = float((truth - truth.shift(lead=7)).std())
         d.append(Diagnostic(f"mean_{ch}", "drift", (-s, s), "median",
                             lambda x, ch=ch: x[f"mean_{ch}_model"] - x[f"mean_{ch}_truth"]))
     d += [Diagnostic("front_vs_persistence", "eddies", FRONT_BAND, "median", ratio("front_mean_km_model", "front_mean_km_pers")),

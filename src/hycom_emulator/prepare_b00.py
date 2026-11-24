@@ -30,7 +30,7 @@ DIFF_STD_FLOOR = 0.05
 LAYER_STATE = ("temp", "salin", "thknss", "u", "v")
 SURFACE_STATE = ("srfhgt", "montg1", "ubaro", "vbaro")
 LAYER_FORCING = ("temp", "salin", "thknss")
-IAU_WEIGHTS = (0.75, 0.25)  # inc(d-2), inc(d-1) over 00Z(d-1) -> 00Z(d)
+IAU_WEIGHTS = (0.75, 0.25)
 ATM_UNITS = {"wndewd": "m/s", "wndnwd": "m/s", "airtmp": "degC", "vapmix": "kg/kg", "precip": "m/s",
              "dswflx": "W/m2", "dlwflx": "W/m2", "mslprs": "Pa minus prsbas", "wndspd": "m/s",
              "wndspd_ewd": "m2/s2", "wndspd_nwd": "m2/s2"}
@@ -81,7 +81,7 @@ def prepare(store: Path, out: Path, rmu_a: Path, train_end: np.datetime64, strid
     atm_ds = xr.open_zarr(atm, consolidated=False) if atm is not None else None
     atm_names = sorted(atm_ds.data_vars) if atm_ds is not None else []
     f_names += atm_names
-    t = (src["cycle"].values - np.timedelta64(18, "h"))[2:]  # snapshot time of each kept row
+    t = (src["cycle"].values - np.timedelta64(18, "h"))[2:]
     ngrid = x.size * y.size
     gx, gy = np.meshgrid(x, y, indexing="ij")
     ocean_gi = ocean.T.reshape(-1)
@@ -180,8 +180,6 @@ class TrainStats:
         import xarray as xr
 
         a = self.acc
-        # Floor the raw stds, before _safe's placeholder 1: a channel that never changes gets the floor,
-        # one that is constant everywhere keeps 1 for both.
         raw = {k: np.sqrt(m.m2 / m.n).astype(np.float32) for k, m in a.items()}
         return xr.Dataset(
             {

@@ -26,7 +26,7 @@ set -euo pipefail
 RUN_ID=$1
 OUT=$2
 PY=${PY:-/conda/jmiranda/venvs/hycom-emulator/bin/python}
-export PYTHONPATH=$(cd "$(dirname "$0")/../.." && pwd)/src${PYTHONPATH:+:$PYTHONPATH}  # this checkout, not the venv's editable install
+export PYTHONPATH=$(cd "$(dirname "$0")/../.." && pwd)/src${PYTHONPATH:+:$PYTHONPATH}
 SHM=/dev/shm/$USER/$RUN_ID
 read -r TR0 TR1 <<<"${TRAIN:-2001-01-16 2021-12-31}"
 read -r VA0 VA1 <<<"${VAL:-2022-01-01 2023-12-31}"
@@ -56,13 +56,13 @@ splits:
 YAML
 printf 'datastore:\n  kind: hycom\n  config_path: rea.yaml\n' > "$OUT/nlam.yaml"
 GRAPH=multiscale
-if [ -n "${ARCH:-}" ]; then  # writes the conv section into rea.yaml; prints --model <m> --graph <g>
+if [ -n "${ARCH:-}" ]; then
   read -r -a ARCH_ARGS <<<"$($PY -m hycom_emulator.convnet arch "$ARCH" "$OUT/rea.yaml" | tail -1)"
   MODEL+=("${ARCH_ARGS[@]}"); GRAPH=${ARCH_ARGS[3]}; echo "architecture $ARCH: ${ARCH_ARGS[*]}"
 fi
 MODEL+=("${EXTRA[@]}")
 cd "$OUT"
-last_lr() {  # the learning rate the Plateau callback logged last in stage run $1, empty if none
+last_lr() {
   $PY - "$OUT/mlflow.db" "$1" <<'PY'
 import sqlite3, sys
 q = "select m.value from metrics m join runs r on m.run_uuid = r.run_uuid where r.name = ? and m.key = 'lr' order by m.step desc limit 1"
@@ -75,7 +75,7 @@ epoch_of() { $PY -c "import sys, torch; print(torch.load(sys.argv[1], map_locati
 declare -A EPOCHS_DEF=([1]=30 [2]=15 [4]=10 [8]=8 [16]=6) CAP_DEF=([1]=4h [2]=3h [4]=4h [8]=6h [16]=10h)
 
 echo "== $(date -Is) graph"
-timeout 30m $PY -m hycom_emulator.nlam build_graph nlam.yaml $GRAPH  # a <graph>_s<k> builds <graph> first
+timeout 30m $PY -m hycom_emulator.nlam build_graph nlam.yaml $GRAPH
 next_lr() { $PY -c "import sys; lr, floor, end = map(float, sys.argv[1:]); print(min(lr, max(floor, 2 * end)))" "$LR" "${LR_FLOOR:-1e-4}" "$1"; }
 PREV=${START_CKPT:-}; E=0; STAGE_LR=$LR; FIRST_STAGE=1
 if [ -n "${START_RUN:-}" ]; then END_LR=$(last_lr "$START_RUN"); [ -z "$END_LR" ] || STAGE_LR=$(next_lr "$END_LR"); fi

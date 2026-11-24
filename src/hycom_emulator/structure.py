@@ -55,18 +55,16 @@ CAVEAT = ("free runs with the true future wind, sunlight and boundary band: skil
           "inherit that until issue-time-only forcing lands")
 REFERENCE = "engine and LC rules vendored from persistence-ocean feat/write-up-assets 205e3c3 (hycom_emulator.topology)"
 QUARTER_DEG = 0.25
-EDDY_FLOOR_M = 0.055  # persistence-ocean signal-plus-noise floor per eddy, open Gulf, KaRIn central (5-6 cm)
-LC_FLOOR_M = 0.04324  # persistence-ocean touch rule min depth: per-feature q95, L = 50 km, snp central, LCE windows
-TOUCH_DAYS = 8  # ERROR_TIME_SCALE_DAYS: a rejoin counts when deep enough on more than this many days in a row
-NOISE_M, NOISE_KM = 0.035, 50.0  # DUACS mapping error against SWOT KaRIn (3.3-3.8 cm), Gaussian L of the error
+EDDY_FLOOR_M = 0.055
+LC_FLOOR_M = 0.04324
+TOUCH_DAYS = 8
+NOISE_M, NOISE_KM = 0.035, 50.0
 MIN_DEPTH_M = 500.0
 BACK_TRACK_MAX_DAYS = 180
 CENSUS = {"connectivity": 8, "open_boundary": True}
 EARTH_KM_PER_DEG = 111.32
 POLARITY = {"max": "anticyclone", "min": "cyclone"}
 
-
-# ------------------------------------------------------------------------------------------------- distances
 
 def _augmented(d1: np.ndarray, d2: np.ndarray) -> np.ndarray:
     """Cost matrix of a diagram matching with the diagonal: L-infinity between points, persistence / 2 to it."""
@@ -99,8 +97,6 @@ def bottleneck(d1: np.ndarray, d2: np.ndarray) -> float:
         lo, hi = (lo, mid) if (ok >= 0).all() else (mid + 1, hi)
     return float(cand[lo])
 
-
-# ---------------------------------------------------------------------------------------------------- grids
 
 @dataclass(frozen=True)
 class Grid:
@@ -153,8 +149,6 @@ def grids(ds: xr.Dataset, use_native: bool = False) -> tuple[Grid, Grid]:
     return (native(ds, deep) if use_native else quarter(ds.lon.values, ds.lat.values, deep)), lc
 
 
-# ----------------------------------------------------------------------------------------------- noise floor
-
 def noise_floor(grid: Grid, n: int = 200, q: float = 0.95, sigma_m: float = NOISE_M, length_km: float = NOISE_KM,
                 seed: int = 0) -> dict:
     """persistence-ocean's pure-noise null (experiment 02) on this grid: the q quantile of the persistence of every
@@ -166,8 +160,6 @@ def noise_floor(grid: Grid, n: int = 200, q: float = 0.95, sigma_m: float = NOIS
     return {"floor_m": float(np.quantile(p, q)), "q": q, "n_fields": n, "features_per_field": len(p) / n,
             "cells": int(grid.mask.sum()), "sigma_m": sigma_m, "length_km": length_km}
 
-
-# ---------------------------------------------------------------------------------------------- Loop Current
 
 def lc_grid(grid: Grid) -> tp.GulfGrid:
     return tp.gulf_grid(grid.mask, grid.latitude, grid.longitude)
@@ -198,8 +190,6 @@ def lc_events(ssh: np.ndarray, dates, gg: tp.GulfGrid, km2: np.ndarray, floor: f
                 previous = e["separation_date"]
     return det, out
 
-
-# --------------------------------------------------------------------------------------------------- scoring
 
 def census(p: tp.Pairs, floor: float) -> dict:
     a = p.persistence[p.persistence >= floor]
@@ -281,7 +271,7 @@ def truth_series(pack: Path, out: Path, t_from: str, t_to: str) -> list[dict]:
     return events
 
 
-MATCH_DAYS = 15  # a model separation within this many days of a truth one is the same event
+MATCH_DAYS = 15
 
 
 def match_events(events: list[dict]) -> list[dict]:

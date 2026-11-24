@@ -49,7 +49,7 @@ class SystemConfig:
     last_cycle: date
     products: dict[str, str]
     forcing_files: dict[str, str]
-    assimilation: bool = True  # false for a free run: no TSIS namelist, binaries, obs or increments
+    assimilation: bool = True
 
     @classmethod
     def from_toml(cls, path: Path) -> SystemConfig:
